@@ -1,0 +1,1018 @@
+import Component from "@glimmer/component";
+import { tracked } from "@glimmer/tracking";
+import { concat, fn } from "@ember/helper";
+import { on } from "@ember/modifier";
+import { and } from "truth-helpers";
+import { addObserver, removeObserver } from "@ember/object/observers";
+import { getOwner } from "@ember/owner";
+import { schedule } from "@ember/runloop";
+import { service } from "@ember/service";
+import { htmlSafe } from "@ember/template";
+import PreloadStore from "discourse/lib/preload-store";
+import bodyClass from "discourse/helpers/body-class";
+import replaceEmoji from "discourse/helpers/replace-emoji";
+import ConditionalLoadingSpinner from "discourse/components/conditional-loading-spinner";
+import DButton from "discourse/components/d-button";
+import DModal from "discourse/components/d-modal";
+import AnonymousFlagModal from "discourse/components/modal/anonymous-flag";
+import ChangeOwnerModal from "discourse/components/modal/change-owner";
+import ChangePostNoticeModal from "discourse/components/modal/change-post-notice";
+import FlagModal from "discourse/components/modal/flag";
+import GrantBadgeModal from "discourse/components/modal/grant-badge";
+import HistoryModal from "discourse/components/modal/history";
+import PermanentlyDeleteConfirmModal from "discourse/components/modal/permanently-delete-confirm";
+import RawEmailModal from "discourse/components/modal/raw-email";
+import Post from "discourse/components/post";
+import PostSmallAction from "discourse/components/post/small-action";
+import PostTextSelection from "discourse/components/post-text-selection";
+import PostFlag from "discourse/lib/flag-targets/post-flag";
+import TopicPresenceDisplay from "discourse/plugins/discourse-presence/discourse/components/topic-presence-display";
+import { ajax } from "discourse/lib/ajax";
+import { popupAjaxError } from "discourse/lib/ajax-error";
+import { clearBodyLocks } from "discourse/lib/body-scroll-lock";
+import { buildQuote } from "discourse/lib/quote";
+import QuoteState from "discourse/lib/quote-state";
+import DiscourseURL from "discourse/lib/url";
+import Composer from "discourse/models/composer";
+import Draft from "discourse/models/draft";
+import { Placeholder } from "discourse/models/post-stream";
+import { i18n } from "discourse-i18n";
+import TopicPreviewServicePatches from "../../lib/topic-preview-modal/service-patches";
+import TopicPreviewTimingTracker from "../../lib/topic-preview-modal/timing-tracker";
+import lazyImagesModifier from "../../modifiers/topic-preview-modal/lazy-images";
+import createPostVisibilityModifier from "../../modifiers/topic-preview-modal/create-post-visibility-modifier";
+import createLoadMoreSentinelModifier from "../../modifiers/topic-preview-modal/create-load-more-sentinel-modifier";
+
+export default class TopicPreviewModal extends Component {
+  @service bookmarkApi;
+  @service composer;
+  @service currentUser;
+  @service dialog;
+  @service modal;
+  @service messageBus;
+  @service site;
+  @service siteSettings;
+  @service router;
+  @service store;
+  @service topicTrackingState;
+
+  @tracked loading = true;
+  @tracked loadingMore = false;
+  @tracked loadingAbove = false;
+  @tracked topicModel = null;
+  @tracked initialPositioning = true;
+  @tracked showExtraWidgets = false;
+
+  // First-frame render limit: cuts layout cost (network still needs forceLoad).
+  @tracked renderLimit = 1;
+
+  // Local sub-modal so modal.show() does not close the topic-preview-modal.
+  @tracked activeSubModal = null;
+
+  // Disable dismiss while fk-d-menu / sub-modal is open (shared #modal-container).
+  @tracked fkMenuOpen = false;
+
+  fkMenuObserver = null;
+  fkMenuCloseTimer = null;
+  subModalResolve = null;
+  // Flag so modal.close patch knows this is our intentional close.
+  selfInitiatedClose = false;
+  topicController = null;
+  originalTopicControllerModel = undefined;
+  patchesRestored = false;
+  servicePatches = null;
+  timingTracker = null;
+
+  constructor() {
+    super(...arguments);
+
+    this.messageBus.subscribe(`/topic/${this.topicId}`, this.handleTopicMessage);
+
+    // Core components (e.g. PostBookmarkManager) read/write topic.bookmarks
+    // from controller:topic. Point it at our topicModel while modal is open.
+    this.topicController = getOwner(this).lookup("controller:topic");
+    if (this.topicController) {
+      this.originalTopicControllerModel = this.topicController.model;
+    }
+
+    // Delay loadTopic until after first paint unless PreloadStore already has data.
+    if (PreloadStore.get(`topic_${this.topicId}`)) {
+      this.loadTopic();
+    } else {
+      requestAnimationFrame(() => this.loadTopic());
+    }
+
+    let fkCheckScheduled = false;
+
+    this.fkMenuObserver = new MutationObserver(() => {
+      if (fkCheckScheduled) {
+        return;
+      }
+      fkCheckScheduled = true;
+      requestAnimationFrame(() => {
+        fkCheckScheduled = false;
+        if (this.isDestroying || this.isDestroyed) {
+          return;
+        }
+        const isOpen = !!document.querySelector(
+          ".fk-d-menu, .fk-d-menu-modal, .fk-d-tooltip, .pswp--open, #reply-control.open"
+        );
+        if (isOpen) {
+          clearTimeout(this.fkMenuCloseTimer);
+          this.fkMenuOpen = true;
+        } else if (this.fkMenuOpen) {
+          clearTimeout(this.fkMenuCloseTimer);
+          this.fkMenuCloseTimer = setTimeout(() => {
+            this.fkMenuOpen = false;
+          }, 400);
+        }
+      });
+    });
+
+    this.fkMenuObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+
+    // Patches modal.show/close, bookmarkApi, DiscourseURL.routeTo.
+    // See ../../lib/topic-preview-modal/service-patches.js
+    this.servicePatches = new TopicPreviewServicePatches(this);
+
+    // Per-post visible-time tracking → /topics/timings.
+    // See ../../lib/topic-preview-modal/timing-tracker.js
+    this.timingTracker = new TopicPreviewTimingTracker(this);
+
+    addObserver(
+      this.composer,
+      "model.composeState",
+      this.handleComposerStateChange
+    );
+
+    document.addEventListener("keydown", this.handleLightboxKeydown, true);
+    document.addEventListener("focusin", this.handleDocumentFocusIn, true);
+  }
+
+  handleTopicMessage = (data) => {
+    if (this.isDestroying || this.isDestroyed || !this.postStream || !data?.id) {
+      return;
+    }
+
+    switch (data.type) {
+      case "created":
+        // Incremental append (like core) — a full forceLoad refresh has no
+        // nearPost anchor and can jump the modal back to an earlier post.
+        Promise.resolve(this.postStream.triggerNewPostsInStream(data.id)).catch(
+          () => {}
+        );
+        break;
+
+      // Single-post updates: loadPost merges in place without resetting the stream window.
+      case "revised":
+      case "rebaked":
+      case "recovered":
+      case "deleted":
+      case "acted":
+      case "read":
+      case "liked":
+      case "unliked":
+        this.postStream.loadPost(data.id).catch(() => {});
+        break;
+
+      // Hard-deleted posts are no longer addressable via loadPost() (404).
+      case "destroyed":
+        this.postStream
+          .refresh({
+            forceLoad: true,
+            track_visit: false,
+          })
+          .catch(() => {});
+        break;
+
+      default:
+        break;
+    }
+  };
+
+  // Idempotent restore of all service patches.
+  restoreServicePatches() {
+    if (this.patchesRestored) {
+      return;
+    }
+    this.patchesRestored = true;
+    this.servicePatches?.restore();
+    try {
+      if (this.topicController) {
+        this.topicController.set("model", this.originalTopicControllerModel);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  willDestroy() {
+    super.willDestroy(...arguments);
+
+    this.messageBus.unsubscribe(`/topic/${this.topicId}`, this.handleTopicMessage);
+
+    this.timingTracker?.stop();
+    this.restoreServicePatches();
+    clearTimeout(this.fkMenuCloseTimer);
+    this.observePost.disconnect?.();
+    this.fkMenuObserver?.disconnect();
+    removeObserver(
+      this.composer,
+      "model.composeState",
+      this.handleComposerStateChange
+    );
+    document.removeEventListener("keydown", this.handleLightboxKeydown, true);
+    document.removeEventListener("focusin", this.handleDocumentFocusIn, true);
+    this.releaseStaleBodyLocks();
+  }
+
+  // Clear body-scroll-lock after teardown if no other modal/composer remains.
+  releaseStaleBodyLocks() {
+    setTimeout(() => {
+      if (
+        !document.querySelector(".d-modal") &&
+        !document.querySelector("#reply-control.open")
+      ) {
+        clearBodyLocks();
+      }
+    }, 0);
+  }
+
+  // Skeleton during network load AND first positioning (prefetch can
+  // resolve before first paint otherwise).
+  get showSkeleton() {
+    return this.loading || this.initialPositioning;
+  }
+
+  get skeletonItems() {
+    return [1, 2, 3, 4, 5, 6, 7, 8];
+  }
+
+  get dismissable() {
+    return !this.activeSubModal && !this.fkMenuOpen && !this.composerOpen;
+  }
+
+  // composer.isOpen is true even when minimized (DRAFT).
+  get composerOpen() {
+    const state = this.composer.model?.composeState;
+    return !!state && state !== Composer.DRAFT && state !== Composer.CLOSED;
+  }
+
+  quoteState = new QuoteState();
+
+  showSubModal(component, model) {
+    this.activeSubModal = { component, model };
+    return new Promise((resolve) => {
+      this.subModalResolve = resolve;
+    });
+  }
+
+  closeSubModal = (data) => {
+    this.subModalResolve?.(data);
+    this.subModalResolve = null;
+    this.activeSubModal = null;
+  };
+
+  // Restore focus to composer after float-kit menus close (focusTrigger).
+  scheduleComposerFocusGuard() {
+    [150, 700].forEach((delay) => {
+      setTimeout(() => {
+        if (this.isDestroying || this.isDestroyed || !this.composerOpen) {
+          return;
+        }
+        if (
+          this.activeSubModal ||
+          document.querySelector(".fk-d-menu, .fk-d-menu-modal, .fk-d-tooltip")
+        ) {
+          return;
+        }
+        const composerEl = document.querySelector("#reply-control");
+        if (!composerEl) {
+          return;
+        }
+        const active = document.activeElement;
+        if (active && composerEl.contains(active)) {
+          return;
+        }
+        if (typeof this.composer.focusComposer === "function") {
+          this.composer.focusComposer();
+        } else {
+          composerEl.querySelector("textarea.d-editor-input")?.focus();
+        }
+      }, delay);
+    });
+  }
+
+  // Capture-phase: pull focus back if a leftover focus-trap steals it.
+  handleDocumentFocusIn = (event) => {
+    if (!this.composerOpen || this.activeSubModal) {
+      return;
+    }
+    const composerEl = document.querySelector("#reply-control");
+    if (!composerEl || composerEl.contains(event.target)) {
+      return;
+    }
+    const legitPopup = document.querySelector(
+      ".fk-d-menu, .fk-d-menu-modal, .fk-d-tooltip"
+    );
+    if (legitPopup?.contains(event.target)) {
+      return;
+    }
+    schedule("afterRender", () => {
+      if (this.isDestroying || this.isDestroyed || !this.composerOpen) {
+        return;
+      }
+      if (typeof this.composer.focusComposer === "function") {
+        this.composer.focusComposer();
+      } else {
+        composerEl.querySelector("textarea.d-editor-input")?.focus();
+      }
+    });
+  };
+
+  // Capture lightbox keys before DModal/float-kit can swallow them.
+  handleLightboxKeydown = (event) => {
+    const pswp = document.querySelector(".pswp--open");
+    if (!pswp) {
+      return;
+    }
+    let button;
+    if (event.key === "Escape") {
+      button = pswp.querySelector(".pswp__button--close");
+    } else if (event.key === "ArrowRight") {
+      button = pswp.querySelector(".pswp__button--arrow--next");
+    } else if (event.key === "ArrowLeft") {
+      button = pswp.querySelector(".pswp__button--arrow--prev");
+    } else {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    button?.click();
+  };
+
+  // Safety net when composer closes/minimizes: clear stuck sub-modal / fkMenuOpen.
+  handleComposerStateChange = () => {
+    const state = this.composer.model?.composeState;
+    const composerGone =
+      !state || state === Composer.CLOSED || state === Composer.DRAFT;
+    if (!composerGone) {
+      window.getSelection()?.removeAllRanges();
+      this.scheduleComposerFocusGuard();
+      return;
+    }
+    if (this.activeSubModal) {
+      this.closeSubModal();
+    }
+    clearTimeout(this.fkMenuCloseTimer);
+    this.fkMenuOpen = !!document.querySelector(
+      ".fk-d-menu, .fk-d-menu-modal, .fk-d-tooltip, .pswp--open, #reply-control.open"
+    );
+  };
+
+  // Mark close as self-initiated so the modal.close patch lets it through.
+  closeModal = (...args) => {
+    this.selfInitiatedClose = true;
+    try {
+      return this.args.closeModal(...args);
+    } finally {
+      this.selfInitiatedClose = false;
+    }
+  };
+
+  get topic() {
+    return this.args.model.topic;
+  }
+
+  get topicId() {
+    return this.topic.id;
+  }
+
+  get postStream() {
+    return this.topicModel?.postStream;
+  }
+
+  get title() {
+    const t = this.topicModel?.fancy_title ?? this.topic.fancy_title ?? this.topic.title;
+    return this.topicModel?.accepted_answer ? `\u2705 ${t}` : t;
+  }
+
+  get posts() {
+    const allPosts = (this.postStream?.posts ?? []).filter(
+      (p) => !(p instanceof Placeholder)
+    );
+    return allPosts.slice(0, this.renderLimit);
+  }
+
+  get postTuples() {
+    const posts = this.posts;
+    return posts.map((post, index) => ({
+      post,
+      prevPost: index > 0 ? posts[index - 1] : null,
+      nextPost: index < posts.length - 1 ? posts[index + 1] : null,
+    }));
+  }
+
+  // Read internal flags; canAppendMore/canPrependMore flip false on load start.
+  get hasMoreBelow() {
+    return !!(this.postStream?.hasPosts && this.postStream?.lastPostNotLoaded);
+  }
+
+  get hasMoreAbove() {
+    return !!(
+      this.postStream?.hasPosts && this.postStream?.firstPostNotLoaded
+    );
+  }
+
+  @tracked canCreatePost = false;
+
+  async loadTopic() {
+    try {
+      const lastRead = this.topic.last_read_post_number ?? 0;
+      const highestPostNumber = this.topic.highest_post_number ?? 1;
+      const initialPostNumber = Math.max(
+        1,
+        Math.min(lastRead + 1, highestPostNumber)
+      );
+
+      this.topicModel = this.store.createRecord("topic", {
+        id: this.topicId,
+        slug: this.topic.slug,
+      });
+
+      if (!this.router.currentRouteName.startsWith("topic.")) {
+        this.topicController?.set("model", this.topicModel);
+      }
+
+      // forceLoad required: store may return a stale identity-map instance.
+      await this.postStream.refresh({
+        forceLoad: true,
+        track_visit: true,
+        nearPost: initialPostNumber,
+      });
+
+      this.timingTracker.trackView();
+
+      if (this.isDestroying || this.isDestroyed) {
+        return;
+      }
+
+      this.canCreatePost = !!this.topicModel?.details?.can_create_post;
+
+      const targetPostNumber =
+        this.postStream?.closestPostNumberFor?.(initialPostNumber) ??
+        initialPostNumber;
+
+      // Render only up to target post on first frame; rest after paint.
+      const targetIndex = (this.postStream?.posts ?? [])
+        .filter((post) => !(post instanceof Placeholder))
+        .findIndex((post) => post.post_number === targetPostNumber);
+      this.renderLimit = Math.max(3, targetIndex + 1);
+
+      this.scrollToPost(targetPostNumber, false, 0, () => {
+        this.initialPositioning = false;
+      });
+
+      const renderRemainingPosts = () => {
+        if (this.isDestroying || this.isDestroyed) {
+          return;
+        }
+
+        const totalPosts = this.postStream?.posts?.length || 0;
+
+        if (this.renderLimit < totalPosts) {
+          this.renderLimit = Math.min(this.renderLimit + 5, totalPosts);
+
+          if (this.renderLimit < totalPosts) {
+            if (window.requestIdleCallback) {
+              window.requestIdleCallback(renderRemainingPosts, { timeout: 300 });
+            } else {
+              setTimeout(renderRemainingPosts, 30);
+            }
+            return;
+          }
+        }
+
+        this.renderLimit = Number.MAX_SAFE_INTEGER;
+        this.showExtraWidgets = true;
+      };
+
+      if (window.requestIdleCallback) {
+        window.requestIdleCallback(renderRemainingPosts, { timeout: 500 });
+      } else {
+        setTimeout(renderRemainingPosts, 0);
+      }
+    } catch (e) {
+      popupAjaxError(e);
+      this.closeModal();
+    } finally {
+      this.loading = false;
+
+      if (this.currentUser) {
+        this.timingTracker.start();
+      }
+    }
+  }
+
+  loadBelow = async () => {
+    if (this.loading || this.loadingMore || !this.hasMoreBelow) {
+      return;
+    }
+    this.loadingMore = true;
+    try {
+      await this.postStream?.appendMore();
+      this.renderLimit = Number.MAX_SAFE_INTEGER;
+    } finally {
+      this.loadingMore = false;
+    }
+  };
+
+  loadAbove = async () => {
+    if (this.loading || this.loadingAbove || !this.hasMoreAbove) {
+      return;
+    }
+    this.loadingAbove = true;
+    this.renderLimit = Number.MAX_SAFE_INTEGER;
+
+    const scroller = document.querySelector(
+      ".topic-preview-modal .d-modal__body"
+    );
+    const beforeHeight = scroller?.scrollHeight ?? 0;
+    try {
+      await this.postStream?.prependMore();
+    } finally {
+      this.loadingAbove = false;
+      schedule("afterRender", () => {
+        if (scroller) {
+          scroller.scrollTop += scroller.scrollHeight - beforeHeight;
+        }
+      });
+    }
+  };
+
+  // Manual scroll so the page itself does not move.
+  scrollWithinModal(el, smooth = true) {
+    const scroller = document.querySelector(
+      ".topic-preview-modal .d-modal__body"
+    );
+    if (!scroller || !el) {
+      return;
+    }
+    const scrollerRect = scroller.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const topPadding = 12;
+    const delta = elRect.top - scrollerRect.top - topPadding;
+    scroller.scrollBy({ top: delta, behavior: smooth ? "smooth" : "auto" });
+  }
+
+  scrollToPost(postNumber, smooth = true, attempt = 0, onPositioned) {
+    schedule("afterRender", () => {
+      const el = document.querySelector(
+        `.topic-preview-modal [data-post-number="${postNumber}"]`
+      );
+
+      if (el) {
+        this.scrollWithinModal(el, smooth);
+        el.classList.add("highlighted");
+        setTimeout(() => el.classList.remove("highlighted"), 1600);
+
+        requestAnimationFrame(() => {
+          this.scrollWithinModal(el, false);
+
+          if (onPositioned) {
+            setTimeout(() => {
+              this.scrollWithinModal(el, false);
+              onPositioned();
+            }, 150);
+          } else {
+            setTimeout(() => this.scrollWithinModal(el, false), 150);
+          }
+        });
+      } else if (attempt < 15) {
+        setTimeout(
+          () =>
+            this.scrollToPost(postNumber, smooth, attempt + 1, onPositioned),
+          100
+        );
+      }
+    });
+  }
+
+  handleInternalLinkClick = (event) => {
+    const link = event.target.closest?.("a[href]");
+    if (!link) {
+      return;
+    }
+    let url;
+    try {
+      url = new URL(link.href, window.location.origin);
+    } catch {
+      return;
+    }
+    const match = url.pathname.match(/^\/t\/(?:[^/]+\/)?(\d+)(?:\/(\d+))?/);
+    if (!match || parseInt(match[1], 10) !== this.topicId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    this.jumpToPost(match[2] ? parseInt(match[2], 10) : 1);
+  };
+
+  jumpToPost = async (postNumber) => {
+    await this.postStream?.refresh({ nearPost: postNumber });
+    this.scrollToPost(postNumber);
+  };
+
+  replyToTopic = async () => {
+    const opts = {
+      action: Composer.REPLY,
+      draftKey: this.topicModel?.draft_key ?? `topic_${this.topicId}`,
+      draftSequence: this.topicModel?.draft_sequence ?? 0,
+      topic: this.topicModel,
+    };
+
+    await this.#loadDraftInto(opts);
+
+    this.composer.open(opts);
+  };
+
+  replyToPost = async (post) => {
+    const opts = {
+      action: Composer.REPLY,
+      draftKey: this.topicModel?.draft_key ?? `topic_${this.topicId}`,
+      draftSequence: this.topicModel?.draft_sequence ?? 0,
+      topic: this.topicModel,
+      post,
+    };
+
+    await this.#loadDraftInto(opts);
+
+    this.composer.open(opts);
+  };
+
+  // Mirrors core TopicController#replyToPost: composer.open() alone does not
+  // resurrect a saved draft after the modal (and composer) was closed once.
+  #loadDraftInto = async (opts) => {
+    if (opts.quote) {
+      return;
+    }
+    try {
+      const draftData = await Draft.get(opts.draftKey);
+      if (draftData?.draft) {
+        const data = JSON.parse(draftData.draft);
+        opts.reply = data.reply;
+        opts.draftSequence = draftData.draft_sequence;
+      }
+    } catch {
+      // no draft — open blank
+    }
+  };
+
+  editPost = (post) => {
+    if (!this.currentUser) {
+      return this.dialog.alert(i18n("post.controls.edit_anonymous"));
+    }
+    if (!post.can_edit) {
+      return false;
+    }
+    return this.composer.open({
+      post,
+      action: Composer.EDIT,
+      draftKey: post.get("topic.draft_key"),
+      draftSequence: post.get("topic.draft_sequence"),
+    });
+  };
+
+  selectText = async () => {
+    const { postId } = this.quoteState;
+    const postStream = this.postStream;
+    const { markdown: buffer, opts } = await this.quoteState.markdown();
+    const loadedPost = postStream.findLoadedPost(postId);
+    const post = loadedPost ? loadedPost : await postStream.loadPost(postId);
+
+    const composerOpts = {
+      action: Composer.REPLY,
+      draftSequence: post.get("topic.draft_sequence"),
+      draftKey: post.get("topic.draft_key"),
+    };
+
+    if (post.get("post_number") === 1) {
+      composerOpts.topic = post.get("topic");
+    } else {
+      composerOpts.post = post;
+    }
+
+    composerOpts.quote = buildQuote(post, buffer, opts);
+    this.quoteState.clear();
+    await this.composer.open(composerOpts);
+  };
+
+  buildQuoteMarkdown = async () => {
+    const { postId } = this.quoteState;
+    const postStream = this.postStream;
+    const { markdown: buffer, opts } = await this.quoteState.markdown();
+    const loadedPost = postStream.findLoadedPost(postId);
+    const post = loadedPost ? loadedPost : await postStream.loadPost(postId);
+    return buildQuote(post, buffer, opts);
+  };
+
+  deletePost = async (post) => {
+    if (post.post_number === 1) {
+      return this.openFull();
+    }
+    if (!post.can_delete) {
+      return;
+    }
+    this.dialog.yesNoConfirm({
+      message: i18n("post.confirm_delete"),
+      didConfirm: async () => {
+        try {
+          await post.destroy(this.currentUser);
+        } catch (e) {
+          popupAjaxError(e);
+          post.undoDeleteState();
+        }
+      },
+    });
+  };
+
+  recoverPost = (post) => {
+    if (post.post_number === 1) {
+      return this.openFull();
+    }
+    return post.recover();
+  };
+
+  permanentlyDeletePost = async (post) => {
+    let result;
+    try {
+      result = await ajax(`/posts/${post.id}/permanently_delete_check.json`);
+    } catch (e) {
+      return popupAjaxError(e);
+    }
+    if (!result.can_permanently_delete) {
+      return this.dialog.alert(result.reason);
+    }
+    this.showSubModal(PermanentlyDeleteConfirmModal, {
+      message: i18n("post.controls.permanently_delete_post_confirmation"),
+      confirmPhrase: i18n("post.controls.permanently_delete_confirm_phrase"),
+      didConfirm: async () => {
+        try {
+          await post.destroy(this.currentUser, { force_destroy: true });
+        } catch (e) {
+          popupAjaxError(e);
+        }
+      },
+    });
+  };
+
+  lockPost = (post) => post.updatePostField("locked", true);
+  unlockPost = (post) => post.updatePostField("locked", false);
+  toggleWiki = (post) => post.updatePostField("wiki", !post.wiki);
+  togglePostType = (post) => {
+    const regular = this.site.post_types.regular;
+    const moderator = this.site.post_types.moderator_action;
+    return post.updatePostField(
+      "post_type",
+      post.post_type === moderator ? regular : moderator
+    );
+  };
+  rebakePost = (post) => post.rebake();
+  unhidePost = (post) => post.unhide();
+  expandHidden = (post) => post.expandHidden();
+
+  changeNotice = async (post) => {
+    await this.showSubModal(ChangePostNoticeModal, { post });
+  };
+
+  changePostOwner = (post) => {
+    this.showSubModal(ChangeOwnerModal, {
+      selectedPostsCount: 1,
+      selectedPostIds: [post.id],
+      selectedPostsUsername: post.username,
+      multiSelect: false,
+      deselectAll: () => {},
+      toggleMultiSelect: () => {},
+      topic: post.topic ?? this.topicModel,
+    });
+  };
+
+  grantBadge = (post) => {
+    this.showSubModal(GrantBadgeModal, { selectedPost: post });
+  };
+
+  showFlags = (post) => {
+    this.showSubModal(this.currentUser ? FlagModal : AnonymousFlagModal, {
+      flagTarget: new PostFlag(),
+      flagModel: post,
+      setHidden: () => post.set("hidden", true),
+    });
+  };
+
+  showHistory = (post, revision) => {
+    this.showSubModal(HistoryModal, {
+      postId: post.id,
+      postVersion: revision || "latest",
+      post,
+      editPost: (p) => this.editPost(p),
+    });
+  };
+
+  showRawEmail = (post) => {
+    this.showSubModal(RawEmailModal, post);
+  };
+
+  showLogin = () => {
+    this.closeModal();
+    DiscourseURL.redirectTo("/login");
+  };
+
+  showPagePublish = () => this.openFull();
+  showInvite = () => this.openFull();
+  removeAllowedGroup = () => this.openFull();
+  removeAllowedUser = () => this.openFull();
+  selectBelow = () => this.openFull();
+  selectReplies = () => this.openFull();
+  cancelFilter = () => {};
+  updateTopicPageQueryParams = () => {};
+
+  openFull = () => {
+    this.restoreServicePatches();
+    this.closeModal();
+    DiscourseURL.routeTo(`/t/${this.topic.slug}/${this.topicId}`);
+  };
+
+  lazyImages = lazyImagesModifier;
+
+  observePost = createPostVisibilityModifier({
+    rootSelector: ".topic-preview-modal .d-modal__body",
+    onVisible: (postNumber) => this.timingTracker.markVisible(postNumber),
+  });
+
+  sentinel = createLoadMoreSentinelModifier({
+    rootSelector: ".topic-preview-modal .d-modal__body",
+    onIntersect: () => this.loadBelow(),
+  });
+
+  <template>
+    {{bodyClass "topic-preview-opened"}}
+    <DModal
+      @closeModal={{this.closeModal}}
+      @title={{replaceEmoji (htmlSafe this.title)}}
+      @dismissable={{this.dismissable}}
+      @autofocus={{false}}
+      @hidden={{this.composerOpen}}
+      class="topic-preview-modal"
+    >
+      <:body>
+        {{#if this.showSkeleton}}
+          <div
+            class="topic-preview-modal__skeleton-wrapper"
+          >
+            <div
+              class="topic-preview-modal__skeleton"
+              aria-hidden="true"
+            >
+              {{#each this.skeletonItems as |i|}}
+                <div class="topic-preview-modal__skeleton-item">
+                  <div class="topic-preview-modal__skeleton-header">
+                    <div class="topic-preview-modal__skeleton-avatar"></div>
+                    <div class="topic-preview-modal__skeleton-names">
+                      <div class="topic-preview-modal__skeleton-line topic-preview-modal__skeleton-line--name"></div>
+                      <div class="topic-preview-modal__skeleton-line topic-preview-modal__skeleton-line--username"></div>
+                    </div>
+                  </div>
+                  <div class="topic-preview-modal__skeleton-body">
+                    <div class="topic-preview-modal__skeleton-line"></div>
+                    <div class="topic-preview-modal__skeleton-line"></div>
+                    <div class="topic-preview-modal__skeleton-line topic-preview-modal__skeleton-line--short"></div>
+                  </div>
+                </div>
+              {{/each}}
+            </div>
+          </div>
+        {{/if}}
+
+        {{#unless this.loading}}
+          <div class={{if this.initialPositioning "topic-preview-modal__posts-container--hidden"}}>
+            {{#if this.hasMoreAbove}}
+              <ConditionalLoadingSpinner @condition={{this.loadingAbove}}>
+                <DButton
+                  class="btn-default topic-preview-modal__load-earlier"
+                  @translatedLabel={{i18n (themePrefix "topic_preview.load_earlier")}}
+                  @action={{this.loadAbove}}
+                />
+              </ConditionalLoadingSpinner>
+            {{/if}}
+
+            <div
+              class="topic-preview-modal__posts post-stream"
+              {{on "click" this.handleInternalLinkClick capture=true}}
+            >
+              {{#each this.postTuples key="post.id" as |tuple|}}
+                <div
+                  class="topic-preview-modal__post-wrapper"
+                  data-post-number={{tuple.post.post_number}}
+                  {{this.observePost}}
+                  {{this.lazyImages}}
+                >
+                  {{#let
+                    (if tuple.post.isSmallAction PostSmallAction Post)
+                    as |PostComponent|
+                  }}
+                    <PostComponent
+                      @elementId={{concat "post_" tuple.post.post_number}}
+                      @post={{tuple.post}}
+                      @prevPost={{tuple.prevPost}}
+                      @nextPost={{tuple.nextPost}}
+                      @canCreatePost={{this.canCreatePost}}
+                      @changeNotice={{fn this.changeNotice tuple.post}}
+                      @changePostOwner={{fn this.changePostOwner tuple.post}}
+                      @deletePost={{fn this.deletePost tuple.post}}
+                      @editPost={{fn this.editPost tuple.post}}
+                      @expandHidden={{fn this.expandHidden tuple.post}}
+                      @filteringRepliesToPostNumber={{null}}
+                      @grantBadge={{fn this.grantBadge tuple.post}}
+                      @lockPost={{fn this.lockPost tuple.post}}
+                      @permanentlyDeletePost={{fn this.permanentlyDeletePost tuple.post}}
+                      @rebakePost={{fn this.rebakePost tuple.post}}
+                      @recoverPost={{fn this.recoverPost tuple.post}}
+                      @removeAllowedGroup={{this.removeAllowedGroup}}
+                      @removeAllowedUser={{this.removeAllowedUser}}
+                      @replyToPost={{fn this.replyToPost tuple.post}}
+                      @selectBelow={{fn this.selectBelow tuple.post}}
+                      @selectReplies={{fn this.selectReplies tuple.post}}
+                      @showFlags={{fn this.showFlags tuple.post}}
+                      @showHistory={{fn this.showHistory tuple.post}}
+                      @showInvite={{this.showInvite}}
+                      @showLogin={{this.showLogin}}
+                      @showPagePublish={{this.showPagePublish}}
+                      @showRawEmail={{fn this.showRawEmail tuple.post}}
+                      @showReadIndicator={{false}}
+                      @togglePostType={{fn this.togglePostType tuple.post}}
+                      @toggleWiki={{fn this.toggleWiki tuple.post}}
+                      @unhidePost={{fn this.unhidePost tuple.post}}
+                      @unlockPost={{fn this.unlockPost tuple.post}}
+                      @cancelFilter={{this.cancelFilter}}
+                      @updateTopicPageQueryParams={{this.updateTopicPageQueryParams}}
+                      @streamElement={{true}}
+                    />
+                  {{/let}}
+                </div>
+              {{/each}}
+            </div>
+
+            {{#if (and this.topicModel this.showExtraWidgets)}}
+              <div class="topic-preview-modal__presence">
+                <TopicPresenceDisplay @topic={{this.topicModel}} @avatarSize="small" />
+              </div>
+            {{/if}}
+
+            {{#if this.hasMoreBelow}}
+              <div class="topic-preview-modal__sentinel" {{this.sentinel}}>
+                <ConditionalLoadingSpinner @condition={{this.loadingMore}} />
+              </div>
+            {{/if}}
+          </div>
+        {{/unless}}
+      </:body>
+
+      <:footer>
+        {{#if (and this.currentUser this.canCreatePost)}}
+          <DButton
+            class="btn-primary"
+            @icon="reply"
+            @translatedLabel={{i18n "js.composer.reply"}}
+            @action={{this.replyToTopic}}
+          />
+        {{/if}}
+        <DButton
+          class="btn-flat"
+          @icon="up-right-from-square"
+          @translatedLabel={{i18n (themePrefix "topic_preview.open_full")}}
+          @action={{this.openFull}}
+        />
+      </:footer>
+    </DModal>
+
+    {{#if this.topicModel}}
+      <PostTextSelection
+        @topic={{this.topicModel}}
+        @quoteState={{this.quoteState}}
+        @editPost={{this.editPost}}
+        @selectText={{this.selectText}}
+        @buildQuoteMarkdown={{this.buildQuoteMarkdown}}
+      />
+    {{/if}}
+
+    {{#if this.activeSubModal}}
+      <this.activeSubModal.component
+        @model={{this.activeSubModal.model}}
+        @closeModal={{this.closeSubModal}}
+      />
+    {{/if}}
+  </template>
+}

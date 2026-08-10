@@ -1,0 +1,32 @@
+trigger_style:
+  default: "row"
+  type: enum
+  choices:
+    - row
+    - button
+plugin_outlet:
+  default: "topic-list-after-title"
+  type: string
+enable_prefetch:
+  default: true
+  type: bool
+max_concurrent_prefetches:
+  default: 2
+  type: integer
+  min: 1
+  max: 6
+prefetch_debounce_ms:
+  default: 400
+  type: integer
+  min: 0
+  max: 5000
+prefetch_root_margin_px:
+  default: 50
+  type: integer
+  min: 0
+  max: 1000
+max_prefetches_per_minute:
+  default: 15
+  type: integer
+  min: 0
+  max: 500

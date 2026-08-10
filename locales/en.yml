@@ -1,0 +1,35 @@
+en:
+  theme_metadata:
+    description: "Opens topics from the topic list in a native modal: read the posts, react, reply (to the topic or a specific post) and continue where you left off - without leaving the list."
+    settings:
+      trigger_style: >-
+        How the preview modal is opened. "row" makes the whole topic-list
+        row clickable. "button" instead adds a small expand icon that opens
+        the preview, leaving the row's own link/click behavior untouched.
+      plugin_outlet: >-
+        Only used when trigger_style is "button". The plugin outlet name
+        where the expand-icon trigger is rendered, so it can be placed
+        wherever your theme's topic-list layout needs it. Defaults to
+        "topic-list-after-title" (right after the topic title).
+      enable_prefetch: >-
+        Proactively fetch topic content as rows scroll into view, so the
+        preview modal feels instant. Turn off to eliminate this background
+        network traffic entirely - rows still open fine on click, they just
+        load like a normal modal.
+      max_concurrent_prefetches: >-
+        How many topic prefetch requests can be in flight at the same time.
+      prefetch_debounce_ms: >-
+        How long (in milliseconds) a row must sit in view before it's
+        prefetched. Raise this to reduce requests fired by fast scrolling.
+      prefetch_root_margin_px: >-
+        How many pixels before a row reaches the viewport its prefetch can
+        start. Lower this to reduce speculative requests during fast
+        scrolling.
+      max_prefetches_per_minute: >-
+        Stops prefetching once this many requests have fired in the last 60
+        seconds, however far the user keeps scrolling. Resets automatically
+        as time passes. 0 = unlimited.
+  topic_preview:
+    load_earlier: "Earlier posts"
+    open_full: "Open Full Topic"
+    modal_trigger: "Preview Topic"

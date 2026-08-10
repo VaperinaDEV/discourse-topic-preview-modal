@@ -1,0 +1,7 @@
+{
+  "name": "Topic Preview Modal",
+  "about_url": "https://github.com/VaperinaDEV/discourse-topic-preview-modal",
+  "authors": "Don",
+  "component": true,
+  "minimum_discourse_version": "3.4.0"
+}
