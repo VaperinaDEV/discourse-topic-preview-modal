@@ -65,6 +65,12 @@ body.topic-preview-opened {
       animation: rotate-forever 1s infinite linear;
     }
   }
+
+  .d-modal__container {
+    @include viewport.from(sm) {
+      max-width: #{$modal-max-width}px;
+    }
+  }
   
   .d-modal__container,
   .d-modal__body {
