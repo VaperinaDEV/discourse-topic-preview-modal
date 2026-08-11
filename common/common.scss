@@ -51,6 +51,9 @@ body.topic-preview-opened {
 }
 
 .topic-preview-modal {
+  @include viewport.from(sm) {
+    --modal-max-width: #{$modal-max-width}px;
+  }
   
   // Trigger button
   &__trigger-wrapper {
@@ -63,12 +66,6 @@ body.topic-preview-opened {
     &--loading {
       will-change: transform;
       animation: rotate-forever 1s infinite linear;
-    }
-  }
-
-  .d-modal__container {
-    @include viewport.from(sm) {
-      max-width: #{$modal-max-width}px;
     }
   }
   
