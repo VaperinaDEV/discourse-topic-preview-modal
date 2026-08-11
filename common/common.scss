@@ -154,7 +154,8 @@ body.topic-preview-opened {
 
   &__posts-container {
     &--hidden {
-      visibility: hidden;
+      opacity: 0;
+      pointer-events: none;
     }
   }
 
