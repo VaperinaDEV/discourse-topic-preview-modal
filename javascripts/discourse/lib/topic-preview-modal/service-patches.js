@@ -1,4 +1,5 @@
 import DiscourseURL from "discourse/lib/url";
+import { matchTopicLink } from "./topic-link";
 
 // Temporarily redirects a few shared services/singletons so that core
 // components (Post, PostBookmarkManager, flag/history/etc. modals) behave
@@ -85,9 +86,9 @@ export default class TopicPreviewServicePatches {
     this.#originalRouteTo = DiscourseURL.routeTo.bind(DiscourseURL);
     DiscourseURL.routeTo = (path, opts) => {
       if (typeof path === "string") {
-        const match = path.match(/^\/t\/(?:[^/]+\/)?(\d+)(?:\/(\d+))?/);
-        if (match && parseInt(match[1], 10) === component.topicId) {
-          component.jumpToPost(match[2] ? parseInt(match[2], 10) : 1);
+        const match = matchTopicLink(path);
+        if (match && match.topicId === component.topicId) {
+          component.jumpToPost(match.postNumber ?? 1);
           return Promise.resolve();
         }
       }
