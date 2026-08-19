@@ -11,6 +11,13 @@ en:
         where the expand-icon trigger is rendered, so it can be placed
         wherever your theme's topic-list layout needs it. Defaults to
         "topic-list-after-title" (right after the topic title).
+      open_all_topic_links: >-
+        When enabled, ANY link pointing to a topic anywhere on the page (post
+        content, notifications, user card, search results, suggested/related
+        topics, sidebar, etc.) opens the preview modal instead of navigating
+        away - not just topic-list rows. A link to a specific post opens the
+        modal scrolled to that post. Links inside the topic list and inside
+        an already-open preview modal keep their existing behavior.
       modal_max_width: >-
         Maximum width (in pixels) of the preview modal from the sm (mobile)
         viewport breakpoint upward. Below that breakpoint the modal falls
@@ -35,5 +42,5 @@ en:
         as time passes. 0 = unlimited.
   topic_preview:
     load_earlier: "Earlier posts"
-    open_full: "Open Full Topic"
-    modal_trigger: "Preview Topic"
+    open_full: "Open full topic"
+    modal_trigger: "Preview topic"

@@ -54,7 +54,6 @@ body.topic-preview-opened {
   @include viewport.from(sm) {
     --modal-max-width: #{$modal-max-width}px;
   }
-  
   // Trigger button
   &__trigger-wrapper {
     display: inline-flex;

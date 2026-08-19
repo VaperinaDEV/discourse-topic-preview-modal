@@ -39,6 +39,7 @@ import { Placeholder } from "discourse/models/post-stream";
 import { i18n } from "discourse-i18n";
 import TopicPreviewServicePatches from "../../lib/topic-preview-modal/service-patches";
 import TopicPreviewTimingTracker from "../../lib/topic-preview-modal/timing-tracker";
+import { matchTopicLink } from "../../lib/topic-preview-modal/topic-link";
 import lazyImagesModifier from "../../modifiers/topic-preview-modal/lazy-images";
 import createPostVisibilityModifier from "../../modifiers/topic-preview-modal/create-post-visibility-modifier";
 import createLoadMoreSentinelModifier from "../../modifiers/topic-preview-modal/create-load-more-sentinel-modifier";
@@ -62,6 +63,11 @@ export default class TopicPreviewModal extends Component {
   @tracked topicModel = null;
   @tracked initialPositioning = true;
   @tracked showExtraWidgets = false;
+
+  // Set explicitly once loadTopic() resolves (see there for why) rather than
+  // read live off topicModel.fancy_title/accepted_answer in the getter.
+  @tracked resolvedTitle = null;
+  @tracked resolvedAcceptedAnswer = false;
 
   // First-frame render limit: cuts layout cost (network still needs forceLoad).
   @tracked renderLimit = 1;
@@ -396,8 +402,14 @@ export default class TopicPreviewModal extends Component {
   }
 
   get title() {
-    const t = this.topicModel?.fancy_title ?? this.topic.fancy_title ?? this.topic.title;
-    return this.topicModel?.accepted_answer ? `\u2705 ${t}` : t;
+    const t =
+      this.resolvedTitle ??
+      this.topicModel?.fancy_title ??
+      this.topic.fancy_title ??
+      this.topic.title;
+    return this.resolvedAcceptedAnswer || this.topicModel?.accepted_answer
+      ? `\u2705 ${t}`
+      : t;
   }
 
   get posts() {
@@ -431,12 +443,15 @@ export default class TopicPreviewModal extends Component {
 
   async loadTopic() {
     try {
+      // A link that pointed at a specific post (e.g. /t/slug/123/7, from
+      // anywhere on the page, not just the topic list) wins over the
+      // last-read heuristic below.
+      const explicitPostNumber = this.args.model.postNumber;
       const lastRead = this.topic.last_read_post_number ?? 0;
       const highestPostNumber = this.topic.highest_post_number ?? 1;
-      const initialPostNumber = Math.max(
-        1,
-        Math.min(lastRead + 1, highestPostNumber)
-      );
+      const initialPostNumber = explicitPostNumber
+        ? Math.max(1, explicitPostNumber)
+        : Math.max(1, Math.min(lastRead + 1, highestPostNumber));
 
       this.topicModel = this.store.createRecord("topic", {
         id: this.topicId,
@@ -459,6 +474,16 @@ export default class TopicPreviewModal extends Component {
       if (this.isDestroying || this.isDestroyed) {
         return;
       }
+
+      // Read explicitly rather than trust that topicModel's own mutation
+      // notified the `title` getter's consumers — for a freshly created
+      // record (first time this topic is opened this session) it
+      // sometimes doesn't, leaving the modal header blank until the next
+      // open reuses an already-populated store record. Assigning into our
+      // own @tracked fields sidesteps that.
+      this.resolvedTitle =
+        this.topicModel?.fancy_title ?? this.topicModel?.title ?? null;
+      this.resolvedAcceptedAnswer = !!this.topicModel?.accepted_answer;
 
       this.canCreatePost = !!this.topicModel?.details?.can_create_post;
 
@@ -612,13 +637,13 @@ export default class TopicPreviewModal extends Component {
     } catch {
       return;
     }
-    const match = url.pathname.match(/^\/t\/(?:[^/]+\/)?(\d+)(?:\/(\d+))?/);
-    if (!match || parseInt(match[1], 10) !== this.topicId) {
+    const match = matchTopicLink(url.pathname);
+    if (!match || match.topicId !== this.topicId) {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
-    this.jumpToPost(match[2] ? parseInt(match[2], 10) : 1);
+    this.jumpToPost(match.postNumber ?? 1);
   };
 
   jumpToPost = async (postNumber) => {
@@ -842,7 +867,8 @@ export default class TopicPreviewModal extends Component {
   openFull = () => {
     this.restoreServicePatches();
     this.closeModal();
-    DiscourseURL.routeTo(`/t/${this.topic.slug}/${this.topicId}`);
+    const slug = this.topicModel?.slug || this.topic.slug;
+    DiscourseURL.routeTo(slug ? `/t/${slug}/${this.topicId}` : `/t/${this.topicId}`);
   };
 
   lazyImages = lazyImagesModifier;
