@@ -42,5 +42,5 @@ en:
         as time passes. 0 = unlimited.
   topic_preview:
     load_earlier: "Earlier posts"
-    open_full: "Open full topic"
-    modal_trigger: "Preview topic"
+    open_full: "Open Full Topic"
+    modal_trigger: "Preview Topic"
