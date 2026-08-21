@@ -2,6 +2,11 @@ en:
   theme_metadata:
     description: "Opens topics from the topic list in a native modal: read the posts, react, reply (to the topic or a specific post) and continue where you left off - without leaving the list."
     settings:
+      enabled_on: >-
+        Which devices show the preview modal. "both" (default) enables it
+        everywhere, "desktop" or "mobile" restricts it to just that view -
+        on the other device, topic links fall back to Discourse's normal
+        full-page topic navigation.
       trigger_style: >-
         How the preview modal is opened. "row" makes the whole topic-list
         row clickable. "button" instead adds a small expand icon that opens
