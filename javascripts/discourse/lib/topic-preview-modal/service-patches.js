@@ -1,3 +1,4 @@
+import { getOwner } from "@ember/owner";
 import DiscourseURL from "discourse/lib/url";
 import { matchTopicLink } from "./topic-link";
 
@@ -18,9 +19,20 @@ import { matchTopicLink } from "./topic-link";
 //                           secondary error inside PostBookmarkManager.
 //   - DiscourseURL.routeTo -> same-topic links are intercepted and jump
 //                           inside the modal instead of navigating away.
+//   - route:topic#modelFor -> "topic" resolves to our topicModel instead
+//                           of undefined. We render core's topic template
+//                           without ever transitioning the router into the
+//                           "topic" route, so any TopicRoute @action
+//                           calling `this.modelFor("topic")`
+//                           (showFlagTopic, showPagePublish,
+//                           showTopicTimerModal, etc.) would otherwise get
+//                           undefined and crash - confirmed against core
+//                           source, e.g. showFlagTopic passes that model
+//                           straight to FlagModal as `flagModel`.
 //
-// `component` must expose: modal, bookmarkApi (services), selfInitiatedClose,
-// activeSubModal, topicId, showSubModal(), closeSubModal(), jumpToPost().
+// `component` must expose: modal, bookmarkApi (services), topicModel,
+// selfInitiatedClose, activeSubModal, topicId, showSubModal(),
+// closeSubModal(), jumpToPost().
 export default class TopicPreviewServicePatches {
   #component;
   #originalModalShow = null;
@@ -28,6 +40,8 @@ export default class TopicPreviewServicePatches {
   #originalBookmarkCreate = null;
   #originalBookmarkUpdate = null;
   #originalRouteTo = null;
+  #originalModelFor = null;
+  #topicRoute = null;
   #restored = false;
 
   constructor(component) {
@@ -107,6 +121,20 @@ export default class TopicPreviewServicePatches {
       component.closeModal();
       return this.#originalRouteTo(path, opts);
     };
+
+    // TopicRoute actions read their model via modelFor("topic"), not
+    // topicController - see class comment above.
+    const topicRoute = getOwner(component)?.lookup?.("route:topic");
+    if (topicRoute) {
+      this.#topicRoute = topicRoute;
+      this.#originalModelFor = topicRoute.modelFor.bind(topicRoute);
+      topicRoute.modelFor = (name) => {
+        if (name === "topic" && component.topicModel) {
+          return component.topicModel;
+        }
+        return this.#originalModelFor(name);
+      };
+    }
   }
 
   // Idempotent restore of all patched methods. Safe to call multiple times.
@@ -149,6 +177,13 @@ export default class TopicPreviewServicePatches {
     try {
       if (this.#originalRouteTo) {
         DiscourseURL.routeTo = this.#originalRouteTo;
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      if (this.#originalModelFor && this.#topicRoute) {
+        this.#topicRoute.modelFor = this.#originalModelFor;
       }
     } catch {
       // ignore

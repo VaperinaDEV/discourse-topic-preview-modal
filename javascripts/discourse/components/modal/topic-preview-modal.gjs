@@ -23,6 +23,7 @@ import HistoryModal from "discourse/components/modal/history";
 import PermanentlyDeleteConfirmModal from "discourse/components/modal/permanently-delete-confirm";
 import RawEmailModal from "discourse/components/modal/raw-email";
 import Post from "discourse/components/post";
+import Nested from "discourse/components/nested";
 import PostSmallAction from "discourse/components/post/small-action";
 import PostTextSelection from "discourse/components/post-text-selection";
 import PostFlag from "discourse/lib/flag-targets/post-flag";
@@ -35,12 +36,18 @@ import QuoteState from "discourse/lib/quote-state";
 import DiscourseURL from "discourse/lib/url";
 import Composer from "discourse/models/composer";
 import Draft from "discourse/models/draft";
+import Bookmark from "discourse/models/bookmark";
 import { Placeholder } from "discourse/models/post-stream";
+import { processNestedRootResponse } from "discourse/lib/nested-topic-model";
+import processNode, {
+  registerPostInTopicPostStream,
+} from "discourse/lib/process-node";
 import { i18n } from "discourse-i18n";
 import TopicPreviewServicePatches from "../../lib/topic-preview-modal/service-patches";
 import TopicPreviewTimingTracker from "../../lib/topic-preview-modal/timing-tracker";
 import { matchTopicLink } from "../../lib/topic-preview-modal/topic-link";
 import lazyImagesModifier from "../../modifiers/topic-preview-modal/lazy-images";
+import createNestedPostTrackerModifier from "../../modifiers/topic-preview-modal/create-nested-post-tracker-modifier";
 import createPostVisibilityModifier from "../../modifiers/topic-preview-modal/create-post-visibility-modifier";
 import createLoadMoreSentinelModifier from "../../modifiers/topic-preview-modal/create-load-more-sentinel-modifier";
 
@@ -51,6 +58,7 @@ export default class TopicPreviewModal extends Component {
   @service dialog;
   @service modal;
   @service messageBus;
+  @service appEvents;
   @service site;
   @service siteSettings;
   @service router;
@@ -63,6 +71,25 @@ export default class TopicPreviewModal extends Component {
   @tracked topicModel = null;
   @tracked initialPositioning = true;
   @tracked showExtraWidgets = false;
+
+  // Nested-replies state. Nested topics use the core Nested component and its
+  // own tree-loading endpoint instead of the flat PostStream.
+  @tracked nestedRootNodes = [];
+  @tracked nestedOpPost = null;
+  @tracked nestedSort = null;
+  @tracked nestedEffectiveSort = null;
+  @tracked nestedHasMoreRoots = false;
+  @tracked nestedPage = 0;
+  @tracked nestedLoadingMore = false;
+  @tracked nestedPinnedPostIds = [];
+  nestedFetchedChildrenCache = new Map();
+  // post_number -> Post record, for finding/mutating posts at any tree
+  // depth on live MessageBus updates (nestedRootNodes only holds roots).
+  // Populated via the app-wide "nested-replies:post-registered/
+  // unregistered" appEvents that core's NestedPost fires on mount/destroy
+  // - same source NestedController#subscribe() listens to. The OP post
+  // isn't rendered by NestedPost, so it's registered manually instead.
+  nestedPostRegistry = new Map();
 
   // Set explicitly once loadTopic() resolves (see there for why) rather than
   // read live off topicModel.fancy_title/accepted_answer in the getter.
@@ -93,6 +120,19 @@ export default class TopicPreviewModal extends Component {
     super(...arguments);
 
     this.messageBus.subscribe(`/topic/${this.topicId}`, this.handleTopicMessage);
+
+    // See nestedPostRegistry's comment above - these are app-wide events
+    // fired by core's own NestedPost component, not scoped to a
+    // controller, so listening here is exactly as valid as core's own
+    // NestedController#subscribe() doing the same thing.
+    this.appEvents.on(
+      "nested-replies:post-registered",
+      this.handleNestedPostRegistered
+    );
+    this.appEvents.on(
+      "nested-replies:post-unregistered",
+      this.handleNestedPostUnregistered
+    );
 
     // Core components (e.g. PostBookmarkManager) read/write topic.bookmarks
     // from controller:topic. Point it at our topicModel while modal is open.
@@ -159,7 +199,16 @@ export default class TopicPreviewModal extends Component {
   }
 
   handleTopicMessage = (data) => {
-    if (this.isDestroying || this.isDestroyed || !this.postStream || !data?.id) {
+    if (this.isDestroying || this.isDestroyed || !data?.id) {
+      return;
+    }
+
+    if (this.isNestedView) {
+      this.handleNestedTopicMessage(data);
+      return;
+    }
+
+    if (!this.postStream) {
       return;
     }
 
@@ -199,6 +248,187 @@ export default class TopicPreviewModal extends Component {
     }
   };
 
+  // Nested-view counterpart to the switch above. Mirrors core's
+  // NestedController#_onMessage as closely as we can from outside that
+  // controller: root replies get prepended to nestedRootNodes directly;
+  // deeper replies are announced via "nested-replies:child-created" and
+  // inserted by the already-rendered NestedPost/NestedPostChildren
+  // themselves (core's mechanism, not ours). No "destroyed" case, same
+  // as core's own switch for nested topics.
+  handleNestedTopicMessage(data) {
+    switch (data.type) {
+      case "created":
+        this.handleNestedPostCreated(data).catch(() => {});
+        break;
+
+      case "revised":
+      case "rebaked":
+      case "recovered":
+      case "acted":
+      case "read":
+      case "liked":
+      case "unliked":
+        this.handleNestedPostChanged(data).catch(() => {});
+        break;
+
+      case "deleted":
+        this.markNestedPostDeletedLocally(data.id);
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  handleNestedPostRegistered = (post) => {
+    if (
+      post?.post_number != null &&
+      this.topicId != null &&
+      String(post.topic?.id) === String(this.topicId)
+    ) {
+      this.nestedPostRegistry.set(post.post_number, post);
+    }
+  };
+
+  handleNestedPostUnregistered = (post) => {
+    if (
+      post?.post_number != null &&
+      this.nestedPostRegistry.get(post.post_number) === post
+    ) {
+      this.nestedPostRegistry.delete(post.post_number);
+    }
+  };
+
+  findNestedPostById(postId) {
+    for (const post of this.nestedPostRegistry.values()) {
+      if (post.id === postId) {
+        return post;
+      }
+    }
+    return null;
+  }
+
+  nestedPostBelongsToTopic(postData) {
+    return (
+      postData?.topic_id != null &&
+      String(postData.topic_id) === String(this.topicId)
+    );
+  }
+
+  // Mirrors NestedController#isActivityLogPost - small_actions and
+  // action-coded whispers belong in the activity log, not the reply tree.
+  // We don't have that log wired into the modal, so we just drop these
+  // rather than crash trying to render them as a normal reply.
+  isNestedActivityLogPost(postData) {
+    const postTypes = this.site.post_types;
+    if (postData.post_type === postTypes.small_action) {
+      return true;
+    }
+    if (postData.post_type === postTypes.whisper && postData.action_code) {
+      return true;
+    }
+    return false;
+  }
+
+  isNestedPostKnown(postId) {
+    if (this.nestedRootNodes.some((node) => node.post.id === postId)) {
+      return true;
+    }
+    return !!this.findNestedPostById(postId);
+  }
+
+  async handleNestedPostCreated(data) {
+    if (this.isNestedPostKnown(data.id)) {
+      return;
+    }
+
+    const topicId = this.topicId;
+    let postData;
+    try {
+      postData = await ajax(`/posts/${data.id}.json`);
+    } catch {
+      // Post may not be visible to this user.
+      return;
+    }
+
+    if (
+      this.isDestroying ||
+      this.isDestroyed ||
+      this.topicId !== topicId ||
+      !this.nestedPostBelongsToTopic(postData) ||
+      this.isNestedActivityLogPost(postData) ||
+      this.isNestedPostKnown(postData.id)
+    ) {
+      return;
+    }
+
+    const node = processNode(this.store, this.topicModel, {
+      ...postData,
+      children: [],
+    });
+    const replyTo = postData.reply_to_post_number;
+    const isRoot = !replyTo || replyTo === 1;
+
+    if (isRoot) {
+      this.nestedRootNodes = [node, ...this.nestedRootNodes];
+    } else {
+      this.appEvents.trigger("nested-replies:child-created", {
+        topicId,
+        post: node.post,
+        parentPostNumber: replyTo,
+      });
+    }
+  }
+
+  async handleNestedPostChanged(data) {
+    const topicId = this.topicId;
+    let postData;
+    try {
+      postData = await ajax(`/posts/${data.id}.json`);
+    } catch {
+      // Post may not be visible to this user.
+      return;
+    }
+
+    if (
+      this.isDestroying ||
+      this.isDestroyed ||
+      this.topicId !== topicId ||
+      !this.nestedPostBelongsToTopic(postData)
+    ) {
+      return;
+    }
+
+    const existing = this.findNestedPostById(data.id);
+    if (!existing) {
+      // Not currently rendered (e.g. inside a collapsed/unfetched subtree) -
+      // it'll come back fresh from the server whenever that part of the
+      // tree is actually expanded/loaded, same as core.
+      return;
+    }
+
+    // Route through the store so Post.munge runs - rebuilds actions_summary
+    // as ActionSummary instances so flagsAvailable/postActionFor don't drift
+    // out of sync with actionByName after an "acted" event.
+    const updated = this.store.createRecord("post", postData);
+    existing.updateFromPost(updated);
+    if (!postData.deleted_at) {
+      existing.set("deleted_post_placeholder", false);
+    }
+  }
+
+  markNestedPostDeletedLocally(postId) {
+    const post = this.findNestedPostById(postId);
+    if (!post) {
+      return;
+    }
+    post.set("deleted_at", new Date());
+    post.set("deleted_post_placeholder", true);
+    if (!this.currentUser?.staff) {
+      post.set("cooked", "");
+    }
+  }
+
   // Idempotent restore of all service patches.
   restoreServicePatches() {
     if (this.patchesRestored) {
@@ -219,11 +449,21 @@ export default class TopicPreviewModal extends Component {
     super.willDestroy(...arguments);
 
     this.messageBus.unsubscribe(`/topic/${this.topicId}`, this.handleTopicMessage);
+    this.appEvents.off(
+      "nested-replies:post-registered",
+      this.handleNestedPostRegistered
+    );
+    this.appEvents.off(
+      "nested-replies:post-unregistered",
+      this.handleNestedPostUnregistered
+    );
+    this.nestedPostRegistry.clear();
 
     this.timingTracker?.stop();
     this.restoreServicePatches();
     clearTimeout(this.fkMenuCloseTimer);
     this.observePost.disconnect?.();
+    this.nestedPostTracker.disconnect?.();
     this.fkMenuObserver?.disconnect();
     removeObserver(
       this.composer,
@@ -274,6 +514,18 @@ export default class TopicPreviewModal extends Component {
     return new Promise((resolve) => {
       this.subModalResolve = resolve;
     });
+  }
+
+  // Defends post-scoped actions against a missing/malformed post. <Nested>
+  // threads these handlers down uncurried through several layers, unlike
+  // the flat view's <Post> which always curries a specific post - if that
+  // wiring ever misses a post, fail safe (no-op) instead of crashing
+  // inside a core modal's constructor.
+  guardPost(post) {
+    if (post && typeof post === "object" && (post.id || post.post_number)) {
+      return post;
+    }
+    return null;
   }
 
   closeSubModal = (data) => {
@@ -401,6 +653,10 @@ export default class TopicPreviewModal extends Component {
     return this.topicModel?.postStream;
   }
 
+  get isNestedView() {
+    return !!this.topicModel?.is_nested_view;
+  }
+
   get title() {
     const t =
       this.resolvedTitle ??
@@ -441,6 +697,164 @@ export default class TopicPreviewModal extends Component {
 
   @tracked canCreatePost = false;
 
+  // Nested topics are built via a plain store.createRecord(), which skips
+  // the two fixups Topic#updateFromJson() normally does for flat loads:
+  // re-parenting `details.topic` (otherwise notifications URLs read
+  // "/t/undefined/notifications") and wrapping `bookmarks` as real
+  // Bookmark instances (otherwise Topic#removeBookmark crashes). Confirmed
+  // against core source - core's own nested route has the same gap.
+  repairNestedTopicRecord(topic) {
+    if (!topic) {
+      return;
+    }
+
+    if (topic.details && topic.details.topic !== topic) {
+      topic.details.set("topic", topic);
+    }
+
+    if (topic.bookmarks?.length) {
+      topic.set(
+        "bookmarks",
+        topic.bookmarks.map((bookmark) =>
+          bookmark instanceof Bookmark ? bookmark : Bookmark.create(bookmark)
+        )
+      );
+    }
+  }
+
+
+  async loadNestedRoots({ page = 0, sort = null } = {}) {
+    const slug = this.topicModel?.slug || this.topic.slug;
+    const topicId = this.topicId;
+    const resolvedSort =
+      sort ||
+      this.nestedSort ||
+      this.siteSettings.nested_replies_default_sort ||
+      "top";
+
+    const params = new URLSearchParams({
+      page: String(page),
+      sort: resolvedSort,
+    });
+
+    const data = await ajax(
+      `/n/${slug || "-"}/${topicId}.json?${params.toString()}`
+    );
+
+    if (this.isDestroying || this.isDestroyed) {
+      return;
+    }
+
+    const result = processNestedRootResponse({
+      data,
+      params: { post_number: null, context: null },
+      site: this.site,
+      siteSettings: this.siteSettings,
+      store: this.store,
+    });
+
+    this.topicModel = result.topic;
+    this.repairNestedTopicRecord(this.topicModel);
+
+    // result.topic's record identity can change between calls (pagination,
+    // sort change) - re-point topicController every time so core mechanics
+    // reading controller:topic.model never see a stale topic.
+    if (
+      this.topicController &&
+      !this.router.currentRouteName.startsWith("topic.")
+    ) {
+      this.topicController.set("model", this.topicModel);
+    }
+
+    this.nestedOpPost = result.opPost;
+
+    // Fresh load (initial or sort change, not pagination) - previously
+    // registered posts belong to a tree we're about to fully replace.
+    if (page === 0) {
+      this.nestedPostRegistry.clear();
+    }
+
+    // NestedPost never renders the OP, so it never self-registers - do it
+    // by hand, and mirror core's own postStream registration too.
+    if (this.nestedOpPost?.post_number != null) {
+      this.nestedPostRegistry.set(
+        this.nestedOpPost.post_number,
+        this.nestedOpPost
+      );
+    }
+    if (this.nestedOpPost && this.topicModel?.postStream) {
+      registerPostInTopicPostStream(this.topicModel, this.nestedOpPost);
+    }
+
+    // Flag-topic footer button fix lives in service-patches.js
+    // (TopicRoute#modelFor patch) - unrelated to topicModel/topicController.
+    this.nestedRootNodes =
+      page === 0 ? result.rootNodes : [...this.nestedRootNodes, ...result.rootNodes];
+    this.nestedPage = result.page;
+    this.nestedHasMoreRoots = result.hasMoreRoots;
+    this.nestedSort = result.sort;
+    this.nestedEffectiveSort = result.effectiveSort;
+    this.nestedPinnedPostIds = result.pinnedPostIds || [];
+  }
+
+  loadMoreNestedRoots = async () => {
+    if (this.nestedLoadingMore || !this.nestedHasMoreRoots) {
+      return;
+    }
+
+    this.nestedLoadingMore = true;
+    try {
+      await this.loadNestedRoots({
+        page: this.nestedPage + 1,
+        sort: this.nestedSort,
+      });
+    } finally {
+      if (!this.isDestroying && !this.isDestroyed) {
+        this.nestedLoadingMore = false;
+      }
+    }
+  };
+
+  changeNestedSort = async (sort) => {
+    if (sort === this.nestedSort) {
+      return;
+    }
+
+    try {
+      this.nestedLoadingMore = true;
+      this.nestedFetchedChildrenCache.clear();
+      await this.loadNestedRoots({ page: 0, sort });
+    } catch (e) {
+      if (!this.isDestroying && !this.isDestroyed) {
+        popupAjaxError(e);
+      }
+    } finally {
+      if (!this.isDestroying && !this.isDestroyed) {
+        this.nestedLoadingMore = false;
+      }
+    }
+  };
+
+  // Shared tail end of loadTopic() for the nested case, reached either via
+  // the opportunistic fast path (nested-ness already known) or the normal
+  // fallback (nested-ness discovered from the flat response). Kept as one
+  // method so both paths stay in sync.
+  async finishNestedLoad() {
+    await this.loadNestedRoots({ page: 0 });
+
+    if (this.isDestroying || this.isDestroyed) {
+      return;
+    }
+
+    this.resolvedTitle =
+      this.topicModel?.fancy_title ?? this.topicModel?.title ?? null;
+    this.resolvedAcceptedAnswer = !!this.topicModel?.accepted_answer;
+    this.canCreatePost = !!this.topicModel?.details?.can_create_post;
+    this.timingTracker.trackView();
+    this.initialPositioning = false;
+    this.showExtraWidgets = true;
+  }
+
   async loadTopic() {
     try {
       // A link that pointed at a specific post (e.g. /t/slug/123/7, from
@@ -462,12 +876,36 @@ export default class TopicPreviewModal extends Component {
         this.topicController?.set("model", this.topicModel);
       }
 
+      // Opportunistic fast path: if whatever handed us `this.topic` (topic
+      // list row, prefetch cache, etc.) already tells us this is a nested
+      // topic, skip the flat, `nearPost`-windowed postStream fetch entirely
+      // rather than paying for a full flat load whose result we're about to
+      // throw away. This only fires if that field is actually present on
+      // the incoming topic - verify your topic-list payload/prefetch
+      // actually sets one of these before relying on it; if neither is
+      // present we fall through to the always-correct fallback below, which
+      // detects nested-ness from the flat response itself.
+      const knownNestedHint =
+        this.topic?.is_nested_view ?? this.topic?.nested_topic;
+
+      if (knownNestedHint) {
+        return await this.finishNestedLoad();
+      }
+
       // forceLoad required: store may return a stale identity-map instance.
       await this.postStream.refresh({
         forceLoad: true,
         track_visit: true,
         nearPost: initialPostNumber,
       });
+
+      if (this.isDestroying || this.isDestroyed) {
+        return;
+      }
+
+      if (this.topicModel?.is_nested_view) {
+        return await this.finishNestedLoad();
+      }
 
       this.timingTracker.trackView();
 
@@ -665,6 +1103,9 @@ export default class TopicPreviewModal extends Component {
   };
 
   replyToPost = async (post) => {
+    if (!(post = this.guardPost(post, "replyToPost"))) {
+      return;
+    }
     const opts = {
       action: Composer.REPLY,
       draftKey: this.topicModel?.draft_key ?? `topic_${this.topicId}`,
@@ -697,6 +1138,9 @@ export default class TopicPreviewModal extends Component {
   };
 
   editPost = (post) => {
+    if (!(post = this.guardPost(post, "editPost"))) {
+      return;
+    }
     if (!this.currentUser) {
       return this.dialog.alert(i18n("post.controls.edit_anonymous"));
     }
@@ -745,6 +1189,9 @@ export default class TopicPreviewModal extends Component {
   };
 
   deletePost = async (post) => {
+    if (!(post = this.guardPost(post, "deletePost"))) {
+      return;
+    }
     if (post.post_number === 1) {
       return this.openFull();
     }
@@ -765,6 +1212,9 @@ export default class TopicPreviewModal extends Component {
   };
 
   recoverPost = (post) => {
+    if (!(post = this.guardPost(post, "recoverPost"))) {
+      return;
+    }
     if (post.post_number === 1) {
       return this.openFull();
     }
@@ -772,6 +1222,9 @@ export default class TopicPreviewModal extends Component {
   };
 
   permanentlyDeletePost = async (post) => {
+    if (!(post = this.guardPost(post, "permanentlyDeletePost"))) {
+      return;
+    }
     let result;
     try {
       result = await ajax(`/posts/${post.id}/permanently_delete_check.json`);
@@ -794,10 +1247,31 @@ export default class TopicPreviewModal extends Component {
     });
   };
 
-  lockPost = (post) => post.updatePostField("locked", true);
-  unlockPost = (post) => post.updatePostField("locked", false);
-  toggleWiki = (post) => post.updatePostField("wiki", !post.wiki);
+  lockPost = (post) => {
+    if (!(post = this.guardPost(post, "lockPost"))) {
+      return;
+    }
+    return post.updatePostField("locked", true);
+  };
+
+  unlockPost = (post) => {
+    if (!(post = this.guardPost(post, "unlockPost"))) {
+      return;
+    }
+    return post.updatePostField("locked", false);
+  };
+
+  toggleWiki = (post) => {
+    if (!(post = this.guardPost(post, "toggleWiki"))) {
+      return;
+    }
+    return post.updatePostField("wiki", !post.wiki);
+  };
+
   togglePostType = (post) => {
+    if (!(post = this.guardPost(post, "togglePostType"))) {
+      return;
+    }
     const regular = this.site.post_types.regular;
     const moderator = this.site.post_types.moderator_action;
     return post.updatePostField(
@@ -805,15 +1279,39 @@ export default class TopicPreviewModal extends Component {
       post.post_type === moderator ? regular : moderator
     );
   };
-  rebakePost = (post) => post.rebake();
-  unhidePost = (post) => post.unhide();
-  expandHidden = (post) => post.expandHidden();
+
+  rebakePost = (post) => {
+    if (!(post = this.guardPost(post, "rebakePost"))) {
+      return;
+    }
+    return post.rebake();
+  };
+
+  unhidePost = (post) => {
+    if (!(post = this.guardPost(post, "unhidePost"))) {
+      return;
+    }
+    return post.unhide();
+  };
+
+  expandHidden = (post) => {
+    if (!(post = this.guardPost(post, "expandHidden"))) {
+      return;
+    }
+    return post.expandHidden();
+  };
 
   changeNotice = async (post) => {
+    if (!(post = this.guardPost(post, "changeNotice"))) {
+      return;
+    }
     await this.showSubModal(ChangePostNoticeModal, { post });
   };
 
   changePostOwner = (post) => {
+    if (!(post = this.guardPost(post, "changePostOwner"))) {
+      return;
+    }
     this.showSubModal(ChangeOwnerModal, {
       selectedPostsCount: 1,
       selectedPostIds: [post.id],
@@ -826,10 +1324,16 @@ export default class TopicPreviewModal extends Component {
   };
 
   grantBadge = (post) => {
+    if (!(post = this.guardPost(post, "grantBadge"))) {
+      return;
+    }
     this.showSubModal(GrantBadgeModal, { selectedPost: post });
   };
 
   showFlags = (post) => {
+    if (!(post = this.guardPost(post, "showFlags"))) {
+      return;
+    }
     this.showSubModal(this.currentUser ? FlagModal : AnonymousFlagModal, {
       flagTarget: new PostFlag(),
       flagModel: post,
@@ -838,6 +1342,9 @@ export default class TopicPreviewModal extends Component {
   };
 
   showHistory = (post, revision) => {
+    if (!(post = this.guardPost(post, "showHistory"))) {
+      return;
+    }
     this.showSubModal(HistoryModal, {
       postId: post.id,
       postVersion: revision || "latest",
@@ -847,6 +1354,9 @@ export default class TopicPreviewModal extends Component {
   };
 
   showRawEmail = (post) => {
+    if (!(post = this.guardPost(post, "showRawEmail"))) {
+      return;
+    }
     this.showSubModal(RawEmailModal, post);
   };
 
@@ -860,20 +1370,50 @@ export default class TopicPreviewModal extends Component {
   removeAllowedGroup = () => this.openFull();
   removeAllowedUser = () => this.openFull();
   selectBelow = () => this.openFull();
-  selectReplies = () => this.openFull();
+  selectReplies = (post) => this.openFull();
   cancelFilter = () => {};
   updateTopicPageQueryParams = () => {};
 
   openFull = () => {
+    const slug = this.topicModel?.slug || this.topic.slug;
+    const path = slug ? `/t/${slug}/${this.topicId}` : `/t/${this.topicId}`;
+    const router = this.router;
+
+    // Stop modal-only activity immediately. The component's willDestroy also
+    // performs the cleanup, but stopping the tracker here avoids one last
+    // interval flush racing with the topic transition.
+    this.timingTracker?.stop();
     this.restoreServicePatches();
     this.closeModal();
-    const slug = this.topicModel?.slug || this.topic.slug;
-    DiscourseURL.routeTo(slug ? `/t/${slug}/${this.topicId}` : `/t/${this.topicId}`);
+
+    // Do not use DiscourseURL.routeTo() here. That helper also runs its
+    // navigatedToPost() fast-path, which expects a normal topic-route
+    // PostStream/controller state. While leaving this component that state is
+    // intentionally temporary, and routeTo() can therefore hit
+    // `postStream.refresh()` on an undefined stream.
+    //
+    // Wait until the modal close has been rendered, then perform a normal
+    // router transition to the topic URL. This matches the important ordering
+    // of a real topic navigation: modal teardown first, topic navigation second.
+    schedule('afterRender', () => {
+      if (!router || router.currentRouteName?.startsWith('topic.')) {
+        return;
+      }
+      router.transitionTo(path);
+    });
   };
 
   lazyImages = lazyImagesModifier;
 
   observePost = createPostVisibilityModifier({
+    rootSelector: ".topic-preview-modal .d-modal__body",
+    onVisible: (postNumber) => this.timingTracker.markVisible(postNumber),
+  });
+
+  // Nested-view counterpart to observePost + lazyImages above - see
+  // create-nested-post-tracker-modifier.js for why this is one
+  // container-level modifier instead of two per-post ones.
+  nestedPostTracker = createNestedPostTrackerModifier({
     rootSelector: ".topic-preview-modal .d-modal__body",
     onVisible: (postNumber) => this.timingTracker.markVisible(postNumber),
   });
@@ -924,7 +1464,8 @@ export default class TopicPreviewModal extends Component {
 
         {{#unless this.loading}}
           <div class={{if this.initialPositioning "topic-preview-modal__posts-container--hidden"}}>
-            {{#if this.hasMoreAbove}}
+            {{#unless this.isNestedView}}
+              {{#if this.hasMoreAbove}}
               <ConditionalLoadingSpinner @condition={{this.loadingAbove}}>
                 <DButton
                   class="btn-default topic-preview-modal__load-earlier"
@@ -932,63 +1473,105 @@ export default class TopicPreviewModal extends Component {
                   @action={{this.loadAbove}}
                 />
               </ConditionalLoadingSpinner>
-            {{/if}}
+              {{/if}}
+            {{/unless}}
 
             <div
-              class="topic-preview-modal__posts post-stream"
+              class={{if this.isNestedView "topic-preview-modal__posts" "topic-preview-modal__posts post-stream"}}
               {{on "click" this.handleInternalLinkClick capture=true}}
             >
-              {{#each this.postTuples key="post.id" as |tuple|}}
+              {{#if this.isNestedView}}
                 <div
-                  class="topic-preview-modal__post-wrapper"
-                  data-post-number={{tuple.post.post_number}}
-                  {{this.observePost}}
-                  {{this.lazyImages}}
+                  class="topic-preview-modal__nested-tracker"
+                  {{this.nestedPostTracker}}
                 >
-                  {{#let
-                    (if tuple.post.isSmallAction PostSmallAction Post)
-                    as |PostComponent|
-                  }}
-                    <PostComponent
-                      @elementId={{concat "post_" tuple.post.post_number}}
-                      @post={{tuple.post}}
-                      @prevPost={{tuple.prevPost}}
-                      @nextPost={{tuple.nextPost}}
-                      @canCreatePost={{this.canCreatePost}}
-                      @changeNotice={{fn this.changeNotice tuple.post}}
-                      @changePostOwner={{fn this.changePostOwner tuple.post}}
-                      @deletePost={{fn this.deletePost tuple.post}}
-                      @editPost={{fn this.editPost tuple.post}}
-                      @expandHidden={{fn this.expandHidden tuple.post}}
-                      @filteringRepliesToPostNumber={{null}}
-                      @grantBadge={{fn this.grantBadge tuple.post}}
-                      @lockPost={{fn this.lockPost tuple.post}}
-                      @permanentlyDeletePost={{fn this.permanentlyDeletePost tuple.post}}
-                      @rebakePost={{fn this.rebakePost tuple.post}}
-                      @recoverPost={{fn this.recoverPost tuple.post}}
-                      @removeAllowedGroup={{this.removeAllowedGroup}}
-                      @removeAllowedUser={{this.removeAllowedUser}}
-                      @replyToPost={{fn this.replyToPost tuple.post}}
-                      @selectBelow={{fn this.selectBelow tuple.post}}
-                      @selectReplies={{fn this.selectReplies tuple.post}}
-                      @showFlags={{fn this.showFlags tuple.post}}
-                      @showHistory={{fn this.showHistory tuple.post}}
-                      @showInvite={{this.showInvite}}
-                      @showLogin={{this.showLogin}}
-                      @showPagePublish={{this.showPagePublish}}
-                      @showRawEmail={{fn this.showRawEmail tuple.post}}
-                      @showReadIndicator={{false}}
-                      @togglePostType={{fn this.togglePostType tuple.post}}
-                      @toggleWiki={{fn this.toggleWiki tuple.post}}
-                      @unhidePost={{fn this.unhidePost tuple.post}}
-                      @unlockPost={{fn this.unlockPost tuple.post}}
-                      @cancelFilter={{this.cancelFilter}}
-                      @updateTopicPageQueryParams={{this.updateTopicPageQueryParams}}
-                      @streamElement={{true}}
-                    />
-                  {{/let}}
+                  <Nested
+                    @topic={{this.topicModel}}
+                    @opPost={{this.nestedOpPost}}
+                    @rootNodes={{this.nestedRootNodes}}
+                    @sort={{this.nestedSort}}
+                    @effectiveSort={{this.nestedEffectiveSort}}
+                    @hasMoreRoots={{this.nestedHasMoreRoots}}
+                    @loadingMore={{this.nestedLoadingMore}}
+                    @pinnedPostIds={{this.nestedPinnedPostIds}}
+                    @loadMoreRoots={{this.loadMoreNestedRoots}}
+                    @changeSort={{this.changeNestedSort}}
+                    @replyToPost={{this.replyToPost}}
+                    @editPost={{this.editPost}}
+                    @deletePost={{this.deletePost}}
+                    @recoverPost={{this.recoverPost}}
+                    @showFlags={{this.showFlags}}
+                    @showHistory={{this.showHistory}}
+                    @changeNotice={{this.changeNotice}}
+                    @changePostOwner={{this.changePostOwner}}
+                    @grantBadge={{this.grantBadge}}
+                    @lockPost={{this.lockPost}}
+                    @unlockPost={{this.unlockPost}}
+                    @permanentlyDeletePost={{this.permanentlyDeletePost}}
+                    @rebakePost={{this.rebakePost}}
+                    @showPagePublish={{this.showPagePublish}}
+                    @togglePostType={{this.togglePostType}}
+                    @toggleWiki={{this.toggleWiki}}
+                    @unhidePost={{this.unhidePost}}
+                    @fetchedChildrenCache={{this.nestedFetchedChildrenCache}}
+                    @selectReplies={{this.selectReplies}}
+                    @selectBelow={{this.selectBelow}}
+                    @contextMode={{false}}
+                  />
                 </div>
-              {{/each}}
+              {{else}}
+                {{#each this.postTuples key="post.id" as |tuple|}}
+                  <div
+                    class="topic-preview-modal__post-wrapper"
+                    data-post-number={{tuple.post.post_number}}
+                    {{this.observePost}}
+                    {{this.lazyImages}}
+                  >
+                    {{#let
+                      (if tuple.post.isSmallAction PostSmallAction Post)
+                      as |PostComponent|
+                    }}
+                      <PostComponent
+                        @elementId={{concat "post_" tuple.post.post_number}}
+                        @post={{tuple.post}}
+                        @prevPost={{tuple.prevPost}}
+                        @nextPost={{tuple.nextPost}}
+                        @canCreatePost={{this.canCreatePost}}
+                        @changeNotice={{fn this.changeNotice tuple.post}}
+                        @changePostOwner={{fn this.changePostOwner tuple.post}}
+                        @deletePost={{fn this.deletePost tuple.post}}
+                        @editPost={{fn this.editPost tuple.post}}
+                        @expandHidden={{fn this.expandHidden tuple.post}}
+                        @filteringRepliesToPostNumber={{null}}
+                        @grantBadge={{fn this.grantBadge tuple.post}}
+                        @lockPost={{fn this.lockPost tuple.post}}
+                        @permanentlyDeletePost={{fn this.permanentlyDeletePost tuple.post}}
+                        @rebakePost={{fn this.rebakePost tuple.post}}
+                        @recoverPost={{fn this.recoverPost tuple.post}}
+                        @removeAllowedGroup={{this.removeAllowedGroup}}
+                        @removeAllowedUser={{this.removeAllowedUser}}
+                        @replyToPost={{fn this.replyToPost tuple.post}}
+                        @selectBelow={{fn this.selectBelow tuple.post}}
+                        @selectReplies={{fn this.selectReplies tuple.post}}
+                        @showFlags={{fn this.showFlags tuple.post}}
+                        @showHistory={{fn this.showHistory tuple.post}}
+                        @showInvite={{this.showInvite}}
+                        @showLogin={{this.showLogin}}
+                        @showPagePublish={{this.showPagePublish}}
+                        @showRawEmail={{fn this.showRawEmail tuple.post}}
+                        @showReadIndicator={{false}}
+                        @togglePostType={{fn this.togglePostType tuple.post}}
+                        @toggleWiki={{fn this.toggleWiki tuple.post}}
+                        @unhidePost={{fn this.unhidePost tuple.post}}
+                        @unlockPost={{fn this.unlockPost tuple.post}}
+                        @cancelFilter={{this.cancelFilter}}
+                        @updateTopicPageQueryParams={{this.updateTopicPageQueryParams}}
+                        @streamElement={{true}}
+                      />
+                    {{/let}}
+                  </div>
+                {{/each}}
+              {{/if}}
             </div>
 
             {{#if (and this.topicModel this.showExtraWidgets)}}
@@ -997,11 +1580,13 @@ export default class TopicPreviewModal extends Component {
               </div>
             {{/if}}
 
-            {{#if this.hasMoreBelow}}
+            {{#unless this.isNestedView}}
+              {{#if this.hasMoreBelow}}
               <div class="topic-preview-modal__sentinel" {{this.sentinel}}>
                 <ConditionalLoadingSpinner @condition={{this.loadingMore}} />
               </div>
-            {{/if}}
+              {{/if}}
+            {{/unless}}
           </div>
         {{/unless}}
       </:body>

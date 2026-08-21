@@ -51,6 +51,31 @@ body.topic-preview-opened {
 }
 
 .topic-preview-modal {
+  // Nested view
+  .nested-view {
+    &__header,
+    &__topic-actions,
+    &__floating-actions {
+      display: none;
+    }
+    &__op-row {
+      > .topic-avatar {
+        top: var(--space-3);
+      }
+    }
+    &__controls {
+      top: 0 !important;
+    }
+    .nested-post__gutter {
+      .topic-avatar {
+        --nested-sticky-avatar-top: calc(var(--nested-controls-height) + var(--nested-sticky-avatar-top-gap));
+      }
+    }
+    .more-topics__container {
+      display: none;
+    }
+  }
+  
   @include viewport.from(sm) {
     --modal-max-width: #{$modal-max-width}px;
   }
