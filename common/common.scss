@@ -183,6 +183,12 @@ body.topic-preview-opened {
     &--hidden {
       opacity: 0;
       pointer-events: none;
+      
+      // Prevent 'content-visibility: auto' placeholders from breaking
+      // getBoundingClientRect measurements during initial scroll positioning.
+      .topic-post {
+        content-visibility: visible;
+      }
     }
   }
 
