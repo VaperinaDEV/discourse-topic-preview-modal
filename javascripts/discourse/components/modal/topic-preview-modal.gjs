@@ -72,8 +72,7 @@ export default class TopicPreviewModal extends Component {
   @tracked initialPositioning = true;
   @tracked showExtraWidgets = false;
 
-  // Nested-replies state. Nested topics use the core Nested component and its
-  // own tree-loading endpoint instead of the flat PostStream.
+  // Nested topics use core Nested + tree endpoint instead of flat PostStream.
   @tracked nestedRootNodes = [];
   @tracked nestedOpPost = null;
   @tracked nestedSort = null;
@@ -83,16 +82,12 @@ export default class TopicPreviewModal extends Component {
   @tracked nestedLoadingMore = false;
   @tracked nestedPinnedPostIds = [];
   nestedFetchedChildrenCache = new Map();
-  // post_number -> Post record, for finding/mutating posts at any tree
-  // depth on live MessageBus updates (nestedRootNodes only holds roots).
-  // Populated via the app-wide "nested-replies:post-registered/
-  // unregistered" appEvents that core's NestedPost fires on mount/destroy
-  // - same source NestedController#subscribe() listens to. The OP post
-  // isn't rendered by NestedPost, so it's registered manually instead.
+  // post_number -> Post for MessageBus updates at any tree depth.
+  // Populated via nested-replies:post-registered/unregistered appEvents
+  // (same as NestedController). OP is registered manually.
   nestedPostRegistry = new Map();
 
-  // Set explicitly once loadTopic() resolves (see there for why) rather than
-  // read live off topicModel.fancy_title/accepted_answer in the getter.
+  // Set once loadTopic() resolves (fresh store records may not notify getters).
   @tracked resolvedTitle = null;
   @tracked resolvedAcceptedAnswer = false;
 
@@ -121,10 +116,7 @@ export default class TopicPreviewModal extends Component {
 
     this.messageBus.subscribe(`/topic/${this.topicId}`, this.handleTopicMessage);
 
-    // See nestedPostRegistry's comment above - these are app-wide events
-    // fired by core's own NestedPost component, not scoped to a
-    // controller, so listening here is exactly as valid as core's own
-    // NestedController#subscribe() doing the same thing.
+    // App-wide events from core NestedPost (same as NestedController#subscribe).
     this.appEvents.on(
       "nested-replies:post-registered",
       this.handleNestedPostRegistered
@@ -248,13 +240,8 @@ export default class TopicPreviewModal extends Component {
     }
   };
 
-  // Nested-view counterpart to the switch above. Mirrors core's
-  // NestedController#_onMessage as closely as we can from outside that
-  // controller: root replies get prepended to nestedRootNodes directly;
-  // deeper replies are announced via "nested-replies:child-created" and
-  // inserted by the already-rendered NestedPost/NestedPostChildren
-  // themselves (core's mechanism, not ours). No "destroyed" case, same
-  // as core's own switch for nested topics.
+  // Nested counterpart. Mirrors NestedController#_onMessage: roots prepend
+  // to nestedRootNodes; deeper replies via nested-replies:child-created.
   handleNestedTopicMessage(data) {
     switch (data.type) {
       case "created":
@@ -315,10 +302,8 @@ export default class TopicPreviewModal extends Component {
     );
   }
 
-  // Mirrors NestedController#isActivityLogPost - small_actions and
-  // action-coded whispers belong in the activity log, not the reply tree.
-  // We don't have that log wired into the modal, so we just drop these
-  // rather than crash trying to render them as a normal reply.
+  // Mirrors NestedController#isActivityLogPost — drop activity-log posts
+  // (no activity log in the modal).
   isNestedActivityLogPost(postData) {
     const postTypes = this.site.post_types;
     if (postData.post_type === postTypes.small_action) {
@@ -401,15 +386,11 @@ export default class TopicPreviewModal extends Component {
 
     const existing = this.findNestedPostById(data.id);
     if (!existing) {
-      // Not currently rendered (e.g. inside a collapsed/unfetched subtree) -
-      // it'll come back fresh from the server whenever that part of the
-      // tree is actually expanded/loaded, same as core.
+      // Not rendered yet (collapsed/unfetched subtree) — loads fresh later.
       return;
     }
 
-    // Route through the store so Post.munge runs - rebuilds actions_summary
-    // as ActionSummary instances so flagsAvailable/postActionFor don't drift
-    // out of sync with actionByName after an "acted" event.
+    // Via store so Post.munge rebuilds ActionSummary (flags stay in sync after "acted").
     const updated = this.store.createRecord("post", postData);
     existing.updateFromPost(updated);
     if (!postData.deleted_at) {
@@ -516,11 +497,7 @@ export default class TopicPreviewModal extends Component {
     });
   }
 
-  // Defends post-scoped actions against a missing/malformed post. <Nested>
-  // threads these handlers down uncurried through several layers, unlike
-  // the flat view's <Post> which always curries a specific post - if that
-  // wiring ever misses a post, fail safe (no-op) instead of crashing
-  // inside a core modal's constructor.
+  // Nested passes handlers uncurried; fail-safe if post is missing/malformed.
   guardPost(post) {
     if (post && typeof post === "object" && (post.id || post.post_number)) {
       return post;
@@ -697,12 +674,8 @@ export default class TopicPreviewModal extends Component {
 
   @tracked canCreatePost = false;
 
-  // Nested topics are built via a plain store.createRecord(), which skips
-  // the two fixups Topic#updateFromJson() normally does for flat loads:
-  // re-parenting `details.topic` (otherwise notifications URLs read
-  // "/t/undefined/notifications") and wrapping `bookmarks` as real
-  // Bookmark instances (otherwise Topic#removeBookmark crashes). Confirmed
-  // against core source - core's own nested route has the same gap.
+  // createRecord skips Topic#updateFromJson fixups: re-parent details.topic
+  // and wrap bookmarks as Bookmark instances (core nested route has same gap).
   repairNestedTopicRecord(topic) {
     if (!topic) {
       return;
@@ -756,9 +729,7 @@ export default class TopicPreviewModal extends Component {
     this.topicModel = result.topic;
     this.repairNestedTopicRecord(this.topicModel);
 
-    // result.topic's record identity can change between calls (pagination,
-    // sort change) - re-point topicController every time so core mechanics
-    // reading controller:topic.model never see a stale topic.
+    // Record identity can change on pagination/sort — keep controller:topic in sync.
     if (
       this.topicController &&
       !this.router.currentRouteName.startsWith("topic.")
@@ -768,14 +739,12 @@ export default class TopicPreviewModal extends Component {
 
     this.nestedOpPost = result.opPost;
 
-    // Fresh load (initial or sort change, not pagination) - previously
-    // registered posts belong to a tree we're about to fully replace.
+    // Fresh load (not pagination) — clear registry before replacing the tree.
     if (page === 0) {
       this.nestedPostRegistry.clear();
     }
 
-    // NestedPost never renders the OP, so it never self-registers - do it
-    // by hand, and mirror core's own postStream registration too.
+    // OP is not rendered by NestedPost — register manually (+ postStream).
     if (this.nestedOpPost?.post_number != null) {
       this.nestedPostRegistry.set(
         this.nestedOpPost.post_number,
@@ -786,8 +755,6 @@ export default class TopicPreviewModal extends Component {
       registerPostInTopicPostStream(this.topicModel, this.nestedOpPost);
     }
 
-    // Flag-topic footer button fix lives in service-patches.js
-    // (TopicRoute#modelFor patch) - unrelated to topicModel/topicController.
     this.nestedRootNodes =
       page === 0 ? result.rootNodes : [...this.nestedRootNodes, ...result.rootNodes];
     this.nestedPage = result.page;
@@ -835,10 +802,7 @@ export default class TopicPreviewModal extends Component {
     }
   };
 
-  // Shared tail end of loadTopic() for the nested case, reached either via
-  // the opportunistic fast path (nested-ness already known) or the normal
-  // fallback (nested-ness discovered from the flat response). Kept as one
-  // method so both paths stay in sync.
+  // Shared nested-load tail (fast path when known nested, or after flat detect).
   async finishNestedLoad() {
     await this.loadNestedRoots({ page: 0 });
 
@@ -857,9 +821,7 @@ export default class TopicPreviewModal extends Component {
 
   async loadTopic() {
     try {
-      // A link that pointed at a specific post (e.g. /t/slug/123/7, from
-      // anywhere on the page, not just the topic list) wins over the
-      // last-read heuristic below.
+      // Explicit post number from link (e.g. /t/slug/123/7) wins over last-read.
       const explicitPostNumber = this.args.model.postNumber;
       const lastRead = this.topic.last_read_post_number ?? 0;
       const highestPostNumber = this.topic.highest_post_number ?? 1;
@@ -876,15 +838,7 @@ export default class TopicPreviewModal extends Component {
         this.topicController?.set("model", this.topicModel);
       }
 
-      // Opportunistic fast path: if whatever handed us `this.topic` (topic
-      // list row, prefetch cache, etc.) already tells us this is a nested
-      // topic, skip the flat, `nearPost`-windowed postStream fetch entirely
-      // rather than paying for a full flat load whose result we're about to
-      // throw away. This only fires if that field is actually present on
-      // the incoming topic - verify your topic-list payload/prefetch
-      // actually sets one of these before relying on it; if neither is
-      // present we fall through to the always-correct fallback below, which
-      // detects nested-ness from the flat response itself.
+      // Fast path: skip flat postStream fetch when topic is already known nested.
       const knownNestedHint =
         this.topic?.is_nested_view ?? this.topic?.nested_topic;
 
@@ -913,12 +867,7 @@ export default class TopicPreviewModal extends Component {
         return;
       }
 
-      // Read explicitly rather than trust that topicModel's own mutation
-      // notified the `title` getter's consumers — for a freshly created
-      // record (first time this topic is opened this session) it
-      // sometimes doesn't, leaving the modal header blank until the next
-      // open reuses an already-populated store record. Assigning into our
-      // own @tracked fields sidesteps that.
+      // Explicit @tracked copy — fresh store records may not notify the title getter.
       this.resolvedTitle =
         this.topicModel?.fancy_title ?? this.topicModel?.title ?? null;
       this.resolvedAcceptedAnswer = !!this.topicModel?.accepted_answer;
@@ -1376,27 +1325,31 @@ export default class TopicPreviewModal extends Component {
 
   openFull = () => {
     const slug = this.topicModel?.slug || this.topic.slug;
-    const path = slug ? `/t/${slug}/${this.topicId}` : `/t/${this.topicId}`;
+    const topicId = this.topicId;
+    const path = slug ? `/t/${slug}/${topicId}` : `/t/${topicId}`;
     const router = this.router;
 
-    // Stop modal-only activity immediately. The component's willDestroy also
-    // performs the cleanup, but stopping the tracker here avoids one last
-    // interval flush racing with the topic transition.
+    // Stop tracker immediately to avoid a last flush racing the transition.
     this.timingTracker?.stop();
     this.restoreServicePatches();
     this.closeModal();
 
-    // Do not use DiscourseURL.routeTo() here. That helper also runs its
-    // navigatedToPost() fast-path, which expects a normal topic-route
-    // PostStream/controller state. While leaving this component that state is
-    // intentionally temporary, and routeTo() can therefore hit
-    // `postStream.refresh()` on an undefined stream.
-    //
-    // Wait until the modal close has been rendered, then perform a normal
-    // router transition to the topic URL. This matches the important ordering
-    // of a real topic navigation: modal teardown first, topic navigation second.
+    // Avoid DiscourseURL.routeTo() — navigatedToPost() expects a real topic-route
+    // PostStream and can hit refresh() on undefined. Teardown first, then transition.
     schedule('afterRender', () => {
-      if (!router || router.currentRouteName?.startsWith('topic.')) {
+      if (!router) {
+        return;
+      }
+
+      // Skip transition only if page under modal is already this exact topic.
+      // currentRouteName starts with "topic." for any topic — compare ids via URL.
+      const currentMatch = matchTopicLink(window.location.pathname);
+      const alreadyOnThisTopic =
+        router.currentRouteName?.startsWith('topic.') &&
+        currentMatch &&
+        String(currentMatch.topicId) === String(topicId);
+
+      if (alreadyOnThisTopic) {
         return;
       }
       router.transitionTo(path);
@@ -1410,9 +1363,7 @@ export default class TopicPreviewModal extends Component {
     onVisible: (postNumber) => this.timingTracker.markVisible(postNumber),
   });
 
-  // Nested-view counterpart to observePost + lazyImages above - see
-  // create-nested-post-tracker-modifier.js for why this is one
-  // container-level modifier instead of two per-post ones.
+  // Nested counterpart to observePost + lazyImages (container-level modifier).
   nestedPostTracker = createNestedPostTrackerModifier({
     rootSelector: ".topic-preview-modal .d-modal__body",
     onVisible: (postNumber) => this.timingTracker.markVisible(postNumber),

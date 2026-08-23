@@ -41,6 +41,7 @@ export default class TopicListItemClick extends Component {
 
     event.preventDefault();
     event.stopPropagation();
+    event.stopImmediatePropagation();
 
     trackTopicVisit(topic);
     promotePrefetch(topic);
