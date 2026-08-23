@@ -18,7 +18,7 @@ export default apiInitializer((api) => {
   if (settings.trigger_style === "button") {
     api.renderInOutlet(settings.plugin_outlet, TopicPreviewButtonTrigger);
   } else {
-    api.renderInOutlet("topic-list-before-link", TopicListItemClick);
+    api.renderInOutlet("above-topic-list-item", TopicListItemClick);
   }
 
   if (settings.open_all_topic_links) {
