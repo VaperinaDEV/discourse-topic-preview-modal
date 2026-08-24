@@ -105,6 +105,12 @@ export default class TopicListItemClick extends Component {
   // IntersectionObserver drives the same debounce/discard logic on touch
   // (no hover). rootMargin gives a head-start before the row enters the viewport.
   setupVisibilityPrefetch = modifier((element) => {
+    const target = element.parentElement;
+  
+    if (!target) {
+      return;
+    }
+  
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -114,11 +120,14 @@ export default class TopicListItemClick extends Component {
           this.discardTopicPrefetch();
         }
       },
-      { rootMargin: `${settings.prefetch_root_margin_px}px 0px`, threshold: 0 }
+      {
+        rootMargin: `${settings.prefetch_root_margin_px}px 0px`,
+        threshold: 0,
+      }
     );
-
-    observer.observe(element);
-
+  
+    observer.observe(target);
+  
     return () => {
       observer.disconnect();
       this.cancelTopicPrefetch();
@@ -140,7 +149,7 @@ export default class TopicListItemClick extends Component {
 
   <template>
     <div
-      style="position: absolute;"
+      class="hidden"
       {{didInsert this.registerClickHandler}}
       {{willDestroy this.removeClickHandler}}
       {{this.setupVisibilityPrefetch}}
