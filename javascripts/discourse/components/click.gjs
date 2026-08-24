@@ -17,11 +17,8 @@ export default class TopicListItemClick extends Component {
   @service modal;
   @service capabilities;
 
-  // Click handler for non-touch devices
   @bind
   clickHandler(event) {
-    const topic = this.args.outletArgs.topic;
-
     // Find the closest .topic-list-item element
     const targetElement = event.target.closest(".topic-list-item");
     if (!targetElement) return;
@@ -34,10 +31,13 @@ export default class TopicListItemClick extends Component {
       ".discourse-tags a",
       ".topic-statuses a",
       ".bulk-select",
+      ".share-toggle",
     ];
     if (excludedSelectors.some((selector) => event.target.closest(selector))) {
       return;
     }
+
+    const topic = this.args.outletArgs.topic;
 
     event.preventDefault();
     event.stopPropagation();
@@ -129,13 +129,13 @@ export default class TopicListItemClick extends Component {
   // Register click event handler
   @action
   registerClickHandler(element) {
-    element.parentElement.addEventListener("click", this.clickHandler);
+    element.parentElement.addEventListener("click", this.clickHandler, true);
   }
 
   // Remove click event handler
   @action
   removeClickHandler(element) {
-    element.parentElement.removeEventListener("click", this.clickHandler);
+    element.parentElement.removeEventListener("click", this.clickHandler, true);
   }
 
   <template>
