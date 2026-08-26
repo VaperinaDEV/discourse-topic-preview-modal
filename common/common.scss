@@ -206,8 +206,22 @@ body.topic-preview-opened {
   }
 
   .d-modal__footer {
-    button:last-child {
-      margin-left: auto;
+    @include viewport.until(sm) {
+      flex-direction: column;
+      .topic-preview-modal__footer-grip {
+        width: 2.5rem;
+        height: 0.25rem;
+        border-radius: var(--d-border-radius-pill);
+        background: var(--primary-low-mid);
+      }
+    }
+    .topic-preview-modal__footer-content {
+      display: flex;
+      width: 100%;
+  
+      button:last-child {
+        margin-left: auto;
+      }
     }
   }
 
