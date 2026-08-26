@@ -57,6 +57,7 @@ export default class TopicPreviewModal extends Component {
   @service currentUser;
   @service dialog;
   @service modal;
+  @service capabilities;
   @service messageBus;
   @service appEvents;
   @service site;
@@ -1543,20 +1544,29 @@ export default class TopicPreviewModal extends Component {
       </:body>
 
       <:footer>
-        {{#if (and this.currentUser this.canCreatePost)}}
+        {{#unless this.capabilities.viewport.sm}}
+          <div
+            class="topic-preview-modal__footer-grip"
+            aria-hidden="true"
+          ></div>
+        {{/unless}}
+
+        <div class="topic-preview-modal__footer-content">
+          {{#if (and this.currentUser this.canCreatePost)}}
+            <DButton
+              class="btn-primary"
+              @icon="reply"
+              @translatedLabel={{i18n "js.composer.reply"}}
+              @action={{this.replyToTopic}}
+            />
+          {{/if}}
           <DButton
-            class="btn-primary"
-            @icon="reply"
-            @translatedLabel={{i18n "js.composer.reply"}}
-            @action={{this.replyToTopic}}
+            class="btn-flat"
+            @icon="up-right-from-square"
+            @translatedLabel={{i18n (themePrefix "topic_preview.open_full")}}
+            @action={{this.openFull}}
           />
-        {{/if}}
-        <DButton
-          class="btn-flat"
-          @icon="up-right-from-square"
-          @translatedLabel={{i18n (themePrefix "topic_preview.open_full")}}
-          @action={{this.openFull}}
-        />
+        </div>
       </:footer>
     </DModal>
 
