@@ -205,7 +205,7 @@ export default class TopicPreviewSwipeUpDismiss {
       return;
     }
 
-    this.#flingAwayAndDismiss(state.deltaY);
+    this.#flingAwayAndDismiss();
   };
 
   #onTouchCancel = (e) => {
@@ -248,7 +248,7 @@ export default class TopicPreviewSwipeUpDismiss {
   }
 
   // Mirrors DModal's own private #animateSwipeDismiss(), just upward.
-  #flingAwayAndDismiss(position) {
+  #flingAwayAndDismiss() {
     const container = this.#container;
     const backdrop = this.#backdrop;
     const duration = getMaxAnimationTimeMs();
@@ -257,17 +257,12 @@ export default class TopicPreviewSwipeUpDismiss {
       backdrop.animate([{ opacity: 0 }], { fill: "forwards", duration });
     }
 
-    // Continue from the position where the finger was released.
+    // Single-keyframe form: the browser fills in the "from" state from the
+    // container's current computed transform, so this picks up smoothly
+    // from wherever the finger left it.
     const animation = container.animate(
-      [
-        { transform: `translateY(${position}px)` },
-        { transform: "translateY(-100%)" },
-      ],
-      {
-        fill: "forwards",
-        duration,
-        easing: SWIPE_SETTLE_EASING,
-      }
+      [{ transform: "translateY(-100%)" }],
+      { fill: "forwards", duration, easing: SWIPE_SETTLE_EASING }
     );
 
     const dismiss = () => this.#onDismiss();
