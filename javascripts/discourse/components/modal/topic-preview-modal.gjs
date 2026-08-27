@@ -212,7 +212,7 @@ export default class TopicPreviewModal extends Component {
       this.router
     );
     if (
-      this.capabilities.viewport.sm &&
+      !this.capabilities.viewport.sm &&
       settings.modal_dismiss_gesture === "gesture"
     ) {
       this.historyBackDismiss.start();
