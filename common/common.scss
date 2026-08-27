@@ -110,6 +110,10 @@ body.topic-preview-opened {
     }
   }
 
+  &--swiping-up {
+    box-shadow: none;
+  }
+
   // Duration below is intentionally hardcoded rather than shared with JS -
   // keep in sync with BACK_GESTURE_HINT_DURATION_MS in the component if
   // you change one.
