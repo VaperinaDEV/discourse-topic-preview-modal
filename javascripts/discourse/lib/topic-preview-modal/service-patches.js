@@ -118,6 +118,10 @@ export default class TopicPreviewServicePatches {
       // race is what produces "PresenceChannel not found", 404s from
       // /topics/timings, and null errors in currentPostChanged.
       component.restoreServicePatches();
+      // Remove the modal's history marker before the real navigation below.
+      // This must not traverse history; the route transition belongs to the
+      // link the user actually clicked.
+      component.historyBackDismiss?.stop();
       component.closeModal();
       return this.#originalRouteTo(path, opts);
     };

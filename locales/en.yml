@@ -27,6 +27,21 @@ en:
         Maximum width (in pixels) of the preview modal from the sm (mobile)
         viewport breakpoint upward. Below that breakpoint the modal falls
         back to its default sizing.
+      modal_dismiss_gesture: >-
+        How the preview modal's swipe-dismiss is hinted/extended on mobile.
+        Note the modal is already swipe-*down*-dismissable in every mode -
+        that's Discourse's own built-in modal behavior and there's no way to
+        turn it off separately from the close button, Escape, and
+        tap-outside-to-close. "grip" (default) shows a small drag-handle
+        hint in the footer. "gesture" keeps that handle, additionally lets
+        an upward swipe - from anywhere in the modal, once there's no more
+        content left to scroll up through - dismiss it too, and on top of
+        that makes the mobile edge-swipe-back gesture and the Android
+        system Back button/gesture close the modal in place instead of
+        navigating the underlying page away. That Back behavior is unique
+        to this mode and to this modal - no other Discourse modal
+        intercepts Back this way, so only turn "gesture" on if you want
+        that trade-off. "none" hides the handle and adds nothing extra.
       enable_prefetch: >-
         Proactively fetch topic content as rows scroll into view, so the
         preview modal feels instant. Turn off to eliminate this background
@@ -49,3 +64,4 @@ en:
     load_earlier: "Earlier posts"
     open_full: "Open Full Topic"
     modal_trigger: "Preview Topic"
+    back_gesture_hint: "Swipe up/down or use the back gesture/button to close"
