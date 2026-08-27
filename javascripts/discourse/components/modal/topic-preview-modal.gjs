@@ -1457,7 +1457,9 @@ export default class TopicPreviewModal extends Component {
     rootSelector: ".topic-preview-modal .d-modal__container",
     onDismiss: () => this.closeModal(),
     canDismiss: () => this.dismissable,
-    enabled: settings.modal_dismiss_gesture === "gesture",
+    enabled:
+      !this.capabilities.viewport.sm &&
+      settings.modal_dismiss_gesture === "gesture",
   });
 
   <template>
