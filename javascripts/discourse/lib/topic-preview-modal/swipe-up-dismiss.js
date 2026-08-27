@@ -154,6 +154,8 @@ export default class TopicPreviewSwipeUpDismiss {
       }
 
       state.claimed = true;
+      this.#container.classList.add("topic-preview-modal--swiping-up");
+      
       // Distance needed to move the modal completely offscreen.
       state.offscreenDistance = this.#container.getBoundingClientRect().bottom;
     }
@@ -201,6 +203,7 @@ export default class TopicPreviewSwipeUpDismiss {
       state.deltaY >= 0 ||
       (velocity < SWIPE_VELOCITY_THRESHOLD && distance < closeDistance)
     ) {
+      this.#container.classList.remove("topic-preview-modal--swiping-up");
       // Below threshold (or drifted back down at release) - settle back to
       // rest ourselves, since DModal never tracked this gesture to have a
       // snap-back of its own to fall back on.
@@ -216,6 +219,7 @@ export default class TopicPreviewSwipeUpDismiss {
     this.#state = null;
     if (state?.claimed) {
       e.stopPropagation();
+      this.#container.classList.remove("topic-preview-modal--swiping-up");
       this.#animateTo(0, getMaxAnimationTimeMs());
     }
   };
