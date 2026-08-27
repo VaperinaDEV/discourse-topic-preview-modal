@@ -105,6 +105,7 @@ export default class TopicPreviewSwipeUpDismiss {
       direction: null,
       deferred: false,
       claimed: false,
+      offscreenDistance: 0,
     };
     // Deliberately doesn't stop propagation yet - ownership isn't decided
     // until the first real move. DModal's own touchstart handler just
@@ -153,6 +154,8 @@ export default class TopicPreviewSwipeUpDismiss {
       }
 
       state.claimed = true;
+      // Distance needed to move the modal completely offscreen.
+      state.offscreenDistance = this.#container.getBoundingClientRect().bottom;
     }
 
     if (!state.claimed) {
@@ -176,7 +179,7 @@ export default class TopicPreviewSwipeUpDismiss {
     // same as DModal's own live handleSwipe, just inverted (and dampening
     // a downward wobble instead of an upward one).
     const position = deltaY <= 0 ? deltaY : dampenedOverdrag(deltaY);
-    this.#setLivePosition(position);
+    this.#animateTo(position, 0);
   };
 
   #onTouchEnd = (e) => {
@@ -205,7 +208,7 @@ export default class TopicPreviewSwipeUpDismiss {
       return;
     }
 
-    this.#flingAwayAndDismiss();
+    this.#flingAwayAndDismiss(state.offscreenDistance);
   };
 
   #onTouchCancel = (e) => {
@@ -217,24 +220,6 @@ export default class TopicPreviewSwipeUpDismiss {
     }
   };
 
-  // Apply the drag position directly instead of creating a new animation on
-  // every touchmove. Inline styles update synchronously and avoid stale
-  // compositor values or accumulating finished animations.
-  #setLivePosition(position) {
-    const container = this.#container;
-    if (!container) {
-      return;
-    }
-    container.style.transform = `translateY(${position}px)`;
-    if (this.#backdrop) {
-      // Same formula DModal's own #animateBackdropOpacity uses: fades out
-      // proportionally to distance dragged, clamped so it never exceeds
-      // the backdrop's own resting CSS opacity.
-      const opacity = 1 - Math.abs(position) / container.clientHeight;
-      this.#backdrop.style.opacity = Math.max(0, Math.min(opacity, 0.6));
-    }
-  }
-
   #animateTo(position, duration) {
     const container = this.#container;
     if (!container) {
@@ -242,6 +227,9 @@ export default class TopicPreviewSwipeUpDismiss {
     }
 
     if (this.#backdrop) {
+      // Same formula DModal's own #animateBackdropOpacity uses: fades out
+      // proportionally to distance dragged, clamped so it never exceeds
+      // the backdrop's own resting CSS opacity.
       const opacity = 1 - Math.abs(position) / container.clientHeight;
       this.#backdrop.animate(
         [{ opacity: Math.max(0, Math.min(opacity, 0.6)) }],
@@ -254,32 +242,16 @@ export default class TopicPreviewSwipeUpDismiss {
       duration,
       easing: SWIPE_SETTLE_EASING,
     });
-
-    // The animate() calls above already captured their "from" keyframe
-    // synchronously from the inline styles #setLivePosition wrote during the
-    // drag - safe to clear them now so they don't linger under the real
-    // Animation (see #setLivePosition).
-    this.#clearLiveStyles();
-  }
-
-  #clearLiveStyles() {
-    if (this.#container) {
-      this.#container.style.transform = "";
-    }
-    if (this.#backdrop) {
-      this.#backdrop.style.opacity = "";
-    }
   }
 
   #clearInlineStyles() {
-    this.#clearLiveStyles();
     // Animation effects are removed with the modal; reset only if the element remains.
     this.#container?.getAnimations?.().forEach((a) => a.cancel());
     this.#backdrop?.getAnimations?.().forEach((a) => a.cancel());
   }
 
   // Mirrors DModal's own private #animateSwipeDismiss(), just upward.
-  #flingAwayAndDismiss() {
+  #flingAwayAndDismiss(offscreenDistance) {
     const container = this.#container;
     const backdrop = this.#backdrop;
     const duration = getMaxAnimationTimeMs();
@@ -288,16 +260,11 @@ export default class TopicPreviewSwipeUpDismiss {
       backdrop.animate([{ opacity: 0 }], { fill: "forwards", duration });
     }
 
-    // Single-keyframe form: the browser fills in the "from" state from the
-    // container's current computed transform, so this picks up smoothly
-    // from wherever the finger left it - reliably, now that #setLivePosition
-    // is a plain style write rather than a same-tick Animation.
+    // Animate the modal completely offscreen.
     const animation = container.animate(
-      [{ transform: "translateY(-100%)" }],
+      [{ transform: `translateY(-${offscreenDistance}px)` }],
       { fill: "forwards", duration, easing: SWIPE_SETTLE_EASING }
     );
-
-    this.#clearLiveStyles();
 
     const dismiss = () => this.#onDismiss();
     animation.finished.then(dismiss, dismiss);
