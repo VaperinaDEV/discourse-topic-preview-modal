@@ -21,6 +21,7 @@ import { triggerHaptic } from "../lib/topic-preview-modal/haptic";
 // prefetch/timing-tracker/service-patches with the click trigger.
 export default class TopicPreviewButtonTrigger extends Component {
   @service modal;
+  @service capabilities;
 
   @tracked isActivating = false;
 
