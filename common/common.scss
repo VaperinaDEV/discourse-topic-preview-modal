@@ -110,6 +110,38 @@ body.topic-preview-opened {
     }
   }
 
+  &--swiping-up {
+    box-shadow: none;
+  }
+
+  // Duration below is intentionally hardcoded rather than shared with JS -
+  // keep in sync with BACK_GESTURE_HINT_DURATION_MS in the component if
+  // you change one.
+  &__back-gesture-hint {
+    position: sticky;
+    top: 0.5em;
+    z-index: 20;
+    width: fit-content;
+    max-width: calc(100% - 2em);
+    margin: 0 auto 0.75em;
+    padding: 0.5em 0.85em;
+    border-radius: var(--d-border-radius);
+    background: var(--primary);
+    color: var(--secondary);
+    font-size: var(--font-down-1);
+    text-align: center;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    pointer-events: none;
+
+    @media (prefers-reduced-motion: no-preference) {
+      animation: tpm-back-gesture-hint 10s ease forwards;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      animation: tpm-back-gesture-hint-reduced-motion 10s linear forwards;
+    }
+  }
+
   &__skeleton {
     --skeleton-shimmer-rgb: #{hexToRGB($primary-50)};
     
@@ -298,5 +330,39 @@ body.topic-preview-opened {
 
   100% {
     background-color: transparent;
+  }
+}
+
+
+@keyframes tpm-back-gesture-hint {
+  0% {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+
+  12% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  85% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes tpm-back-gesture-hint-reduced-motion {
+  0%,
+  92% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
   }
 }

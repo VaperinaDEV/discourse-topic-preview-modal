@@ -45,11 +45,20 @@ import processNode, {
 import { i18n } from "discourse-i18n";
 import TopicPreviewServicePatches from "../../lib/topic-preview-modal/service-patches";
 import TopicPreviewTimingTracker from "../../lib/topic-preview-modal/timing-tracker";
+import TopicPreviewHistoryBackDismiss from "../../lib/topic-preview-modal/history-back-dismiss";
 import { matchTopicLink } from "../../lib/topic-preview-modal/topic-link";
 import lazyImagesModifier from "../../modifiers/topic-preview-modal/lazy-images";
 import createNestedPostTrackerModifier from "../../modifiers/topic-preview-modal/create-nested-post-tracker-modifier";
 import createPostVisibilityModifier from "../../modifiers/topic-preview-modal/create-post-visibility-modifier";
 import createLoadMoreSentinelModifier from "../../modifiers/topic-preview-modal/create-load-more-sentinel-modifier";
+import createSwipeUpDismissModifier from "../../modifiers/topic-preview-modal/create-swipe-up-dismiss-modifier";
+
+// One-time mobile hint that the native Back gesture/button closes this
+// modal in place. Only shown in "gesture" mode and persisted in localStorage
+// for compatibility across supported Discourse versions.
+const BACK_GESTURE_HINT_SEEN_KEY =
+  "discourse_topic_preview_modal.seen_back_gesture_hint";
+const BACK_GESTURE_HINT_DURATION_MS = 10000;
 
 export default class TopicPreviewModal extends Component {
   @service bookmarkApi;
@@ -101,6 +110,10 @@ export default class TopicPreviewModal extends Component {
   // Disable dismiss while fk-d-menu / sub-modal is open (shared #modal-container).
   @tracked fkMenuOpen = false;
 
+  // One-time "Back also closes this" hint - see #maybeShowBackGestureHint.
+  @tracked showBackGestureHint = false;
+  backGestureHintTimer = null;
+
   fkMenuObserver = null;
   fkMenuCloseTimer = null;
   subModalResolve = null;
@@ -111,6 +124,7 @@ export default class TopicPreviewModal extends Component {
   patchesRestored = false;
   servicePatches = null;
   timingTracker = null;
+  historyBackDismiss = null;
 
   constructor() {
     super(...arguments);
@@ -181,6 +195,21 @@ export default class TopicPreviewModal extends Component {
     // See ../../lib/topic-preview-modal/timing-tracker.js
     this.timingTracker = new TopicPreviewTimingTracker(this);
 
+    // Makes mobile edge-swipe-back close the modal in place
+    // instead of navigating the underlying page. Mobile-only and gesture mode.
+    // See ../../lib/topic-preview-modal/history-back-dismiss.js
+    this.historyBackDismiss = new TopicPreviewHistoryBackDismiss(
+      () => this.closeModal(),
+      this.router
+    );
+    if (
+      !this.capabilities.viewport.sm &&
+      settings.modal_dismiss_gesture === "gesture"
+    ) {
+      this.historyBackDismiss.start();
+      this.#maybeShowBackGestureHint();
+    }
+
     addObserver(
       this.composer,
       "model.composeState",
@@ -189,6 +218,25 @@ export default class TopicPreviewModal extends Component {
 
     document.addEventListener("keydown", this.handleLightboxKeydown, true);
     document.addEventListener("focusin", this.handleDocumentFocusIn, true);
+  }
+
+  // Shows a one-time hint in mobile "gesture" mode that Back also closes
+  // the modal. Persists via localStorage, falling back to once per session.
+  #maybeShowBackGestureHint() {
+    try {
+      if (localStorage.getItem(BACK_GESTURE_HINT_SEEN_KEY)) {
+        return;
+      }
+      localStorage.setItem(BACK_GESTURE_HINT_SEEN_KEY, "1");
+    } catch {
+      // Fall through and show it anyway - worst case it reappears on a
+      // later visit, which beats a user never being told at all.
+    }
+
+    this.showBackGestureHint = true;
+    this.backGestureHintTimer = setTimeout(() => {
+      this.showBackGestureHint = false;
+    }, BACK_GESTURE_HINT_DURATION_MS);
   }
 
   handleTopicMessage = (data) => {
@@ -442,6 +490,8 @@ export default class TopicPreviewModal extends Component {
     this.nestedPostRegistry.clear();
 
     this.timingTracker?.stop();
+    this.historyBackDismiss?.stop();
+    clearTimeout(this.backGestureHintTimer);
     this.restoreServicePatches();
     clearTimeout(this.fkMenuCloseTimer);
     this.observePost.disconnect?.();
@@ -481,6 +531,13 @@ export default class TopicPreviewModal extends Component {
 
   get dismissable() {
     return !this.activeSubModal && !this.fkMenuOpen && !this.composerOpen;
+  }
+
+  // Only "grip" mode shows the drag-handle hint; "gesture" uses its own
+  // upward-drag gesture, while "none" hides it. Swipe-down dismissal remains
+  // available in all modes via DModal's built-in behavior.
+  get showGrip() {
+    return settings.modal_dismiss_gesture === "grip";
   }
 
   // composer.isOpen is true even when minimized (DRAFT).
@@ -1332,6 +1389,9 @@ export default class TopicPreviewModal extends Component {
 
     // Stop tracker immediately to avoid a last flush racing the transition.
     this.timingTracker?.stop();
+    // Remove the modal's history marker before scheduling the real
+    // transition below. The cleanup must not traverse browser history.
+    this.historyBackDismiss?.stop();
     this.restoreServicePatches();
     this.closeModal();
 
@@ -1375,6 +1435,15 @@ export default class TopicPreviewModal extends Component {
     onIntersect: () => this.loadBelow(),
   });
 
+  swipeUpDismiss = createSwipeUpDismissModifier({
+    rootSelector: ".topic-preview-modal .d-modal__container",
+    onDismiss: () => this.closeModal(),
+    canDismiss: () => this.dismissable,
+    enabled:
+      !this.capabilities.viewport.sm &&
+      settings.modal_dismiss_gesture === "gesture",
+  });
+
   <template>
     {{bodyClass "topic-preview-opened"}}
     <DModal
@@ -1384,8 +1453,18 @@ export default class TopicPreviewModal extends Component {
       @autofocus={{false}}
       @hidden={{this.composerOpen}}
       class="topic-preview-modal"
+      {{this.swipeUpDismiss}}
     >
       <:body>
+        {{#if this.showBackGestureHint}}
+          <div
+            class="topic-preview-modal__back-gesture-hint"
+            role="status"
+          >
+            {{i18n (themePrefix "topic_preview.back_gesture_hint")}}
+          </div>
+        {{/if}}
+
         {{#if this.showSkeleton}}
           <div
             class="topic-preview-modal__skeleton-wrapper"
@@ -1545,10 +1624,12 @@ export default class TopicPreviewModal extends Component {
 
       <:footer>
         {{#unless this.capabilities.viewport.sm}}
-          <div
-            class="topic-preview-modal__footer-grip"
-            aria-hidden="true"
-          ></div>
+          {{#if this.showGrip}}
+            <div
+              class="topic-preview-modal__footer-grip"
+              aria-hidden="true"
+            ></div>
+          {{/if}}
         {{/unless}}
 
         <div class="topic-preview-modal__footer-content">
