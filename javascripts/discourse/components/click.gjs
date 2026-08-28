@@ -12,6 +12,7 @@ import {
   promotePrefetch,
   trackTopicVisit,
 } from "../lib/topic-preview-modal/prefetch";
+import { triggerHaptic } from "../lib/topic-preview-modal/haptic";
 
 export default class TopicListItemClick extends Component {
   @service modal;
@@ -45,6 +46,8 @@ export default class TopicListItemClick extends Component {
 
     trackTopicVisit(topic);
     promotePrefetch(topic);
+
+    triggerHaptic(this.capabilities, "open");
 
     this.modal.show(TopicPreviewModal, {
       model: { topic },

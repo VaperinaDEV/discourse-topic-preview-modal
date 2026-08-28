@@ -29,6 +29,9 @@ modal_dismiss_gesture:
     - none
     - grip
     - gesture
+modal_haptic_feedback:
+  default: true
+  type: bool
 enable_prefetch:
   default: true
   type: bool

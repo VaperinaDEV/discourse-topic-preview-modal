@@ -1,6 +1,7 @@
 import TopicPreviewModal from "../../components/modal/topic-preview-modal";
 import { trackTopicVisit } from "./prefetch";
 import { matchTopicLink } from "./topic-link";
+import { triggerHaptic } from "./haptic";
 
 // Installs a single, capture-phase document click listener that opens the
 // preview modal for ANY link pointing to a topic, anywhere on the page —
@@ -87,6 +88,9 @@ function handleClick(event, api) {
 
   const topic = { id: match.topicId, slug: match.slug };
   trackTopicVisit(topic);
+
+  const capabilities = api.container.lookup("service:capabilities");
+  triggerHaptic(capabilities, "open");
 
   api.container.lookup("service:modal").show(TopicPreviewModal, {
     model: { topic, postNumber: match.postNumber },
