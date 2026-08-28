@@ -53,13 +53,9 @@ import createPostVisibilityModifier from "../../modifiers/topic-preview-modal/cr
 import createLoadMoreSentinelModifier from "../../modifiers/topic-preview-modal/create-load-more-sentinel-modifier";
 import createSwipeUpDismissModifier from "../../modifiers/topic-preview-modal/create-swipe-up-dismiss-modifier";
 
-// One-time mobile hint telling the user the native Back gesture/button
-// closes this modal in place - unlike every other Discourse modal, where
-// Back just navigates the page away underneath it. Only relevant in
-// "gesture" mode (see settings.modal_dismiss_gesture). Persisted in
-// localStorage rather than a Discourse service, since that's the one
-// storage primitive guaranteed to exist across the range of Discourse
-// versions this component supports.
+// One-time mobile hint that the native Back gesture/button closes this
+// modal in place. Only shown in "gesture" mode and persisted in localStorage
+// for compatibility across supported Discourse versions.
 const BACK_GESTURE_HINT_SEEN_KEY =
   "discourse_topic_preview_modal.seen_back_gesture_hint";
 const BACK_GESTURE_HINT_DURATION_MS = 10000;
@@ -199,13 +195,8 @@ export default class TopicPreviewModal extends Component {
     // See ../../lib/topic-preview-modal/timing-tracker.js
     this.timingTracker = new TopicPreviewTimingTracker(this);
 
-    // Makes the mobile edge-swipe-back gesture and the Android system Back
-    // button/gesture (incl. inside the Bubblewrap TWA wrapper) close the
-    // modal in place instead of navigating the underlying page away - like
-    // Facebook's own mobile modals. This is NOT how any other Discourse
-    // modal behaves (Back normally just navigates the page away under it),
-    // so it's opt-in: mobile-only (desktop's Back button is left alone) and
-    // only wired up in "gesture" mode, per request.
+    // Makes mobile edge-swipe-back close the modal in place
+    // instead of navigating the underlying page. Mobile-only and gesture mode.
     // See ../../lib/topic-preview-modal/history-back-dismiss.js
     this.historyBackDismiss = new TopicPreviewHistoryBackDismiss(
       () => this.closeModal(),
@@ -229,13 +220,8 @@ export default class TopicPreviewModal extends Component {
     document.addEventListener("focusin", this.handleDocumentFocusIn, true);
   }
 
-  // Shows a brief, self-dismissing hint the very first time a user hits
-  // "gesture" mode on mobile, telling them Back closes this modal too -
-  // since that's unique to this modal and not something they'd expect
-  // coming from anywhere else in Discourse. Persists a "seen" flag in
-  // localStorage so it never shows again after that; if storage isn't
-  // available (private browsing, disabled, etc.) it degrades to showing
-  // once per session instead of not at all.
+  // Shows a one-time hint in mobile "gesture" mode that Back also closes
+  // the modal. Persists via localStorage, falling back to once per session.
   #maybeShowBackGestureHint() {
     try {
       if (localStorage.getItem(BACK_GESTURE_HINT_SEEN_KEY)) {
@@ -547,13 +533,9 @@ export default class TopicPreviewModal extends Component {
     return !this.activeSubModal && !this.fkMenuOpen && !this.composerOpen;
   }
 
-  // Only the "grip" mode shows the drag-handle hint - "gesture" has its
-  // own upward-drag gesture instead (nothing to grip onto, it can start
-  // from anywhere in the post list), and "none" hides it entirely. Note the
-  // modal is swipe-*down*-dismissable in every mode regardless of this
-  // setting - that's DModal's own built-in behavior and there's no
-  // argument to turn it off separately from the close button, Escape, and
-  // tap-outside.
+  // Only "grip" mode shows the drag-handle hint; "gesture" uses its own
+  // upward-drag gesture, while "none" hides it. Swipe-down dismissal remains
+  // available in all modes via DModal's built-in behavior.
   get showGrip() {
     return settings.modal_dismiss_gesture === "grip";
   }
