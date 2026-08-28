@@ -33,6 +33,9 @@ en:
         <strong>Grip:</strong> shows a drag handle in the modal footer.<br>
         <strong>Gesture:</strong> enables swipe-up and native Back dismissal.<br>
         Swipe-down dismissal is available in all modes.
+      modal_haptic_feedback: >-
+        Enable haptic feedback when opening and closing the preview modal on
+        supported Android devices.  
       enable_prefetch: >-
         Proactively fetch topic content as rows scroll into view, so the
         preview modal feels instant. Turn off to eliminate this background
