@@ -28,10 +28,10 @@ en:
         viewport breakpoint upward. Below that breakpoint the modal falls
         back to its default sizing.
       modal_dismiss_gesture: >-
-        Controls how the preview modal can be dismissed on mobile.<br><br>
-        None: no drag handle or additional gestures.<br>
-        Grip: shows a drag handle in the modal footer.<br>
-        Gesture: enables swipe-up and native Back dismissal.<br><br>
+        Controls how the preview modal can be dismissed on mobile.<br>
+        <strong>None:</strong> no drag handle or additional gestures.<br>
+        <strong>Grip:</strong> shows a drag handle in the modal footer.<br>
+        <strong>Gesture:</strong> enables swipe-up and native Back dismissal.<br>
         Swipe-down dismissal is available in all modes.
       enable_prefetch: >-
         Proactively fetch topic content as rows scroll into view, so the
