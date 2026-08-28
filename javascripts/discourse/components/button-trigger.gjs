@@ -13,6 +13,7 @@ import {
   promotePrefetch,
   trackTopicVisit,
 } from "../lib/topic-preview-modal/prefetch";
+import { triggerHaptic } from "../lib/topic-preview-modal/haptic";
 
 // Explicit trigger icon (settings.trigger_style === "button").
 // Unlike click.gjs this does not overlay the row — title link and other
@@ -64,6 +65,8 @@ export default class TopicPreviewButtonTrigger extends Component {
 
     trackTopicVisit(topic);
     promotePrefetch(topic);
+
+    triggerHaptic(this.capabilities, "open");
 
     try {
       await this.modal.show(TopicPreviewModal, {
