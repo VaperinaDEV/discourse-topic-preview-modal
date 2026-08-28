@@ -47,6 +47,7 @@ import TopicPreviewServicePatches from "../../lib/topic-preview-modal/service-pa
 import TopicPreviewTimingTracker from "../../lib/topic-preview-modal/timing-tracker";
 import TopicPreviewHistoryBackDismiss from "../../lib/topic-preview-modal/history-back-dismiss";
 import { matchTopicLink } from "../../lib/topic-preview-modal/topic-link";
+import { triggerHaptic } from "../../lib/topic-preview-modal/haptic";
 import lazyImagesModifier from "../../modifiers/topic-preview-modal/lazy-images";
 import createNestedPostTrackerModifier from "../../modifiers/topic-preview-modal/create-nested-post-tracker-modifier";
 import createPostVisibilityModifier from "../../modifiers/topic-preview-modal/create-post-visibility-modifier";
@@ -669,6 +670,9 @@ export default class TopicPreviewModal extends Component {
   // Mark close as self-initiated so the modal.close patch lets it through.
   closeModal = (...args) => {
     this.selfInitiatedClose = true;
+
+    triggerHaptic(this.capabilities, "close");
+
     try {
       return this.args.closeModal(...args);
     } finally {
