@@ -2,7 +2,7 @@ import Component from "@glimmer/component";
 import { tracked } from "@glimmer/tracking";
 import { concat, fn } from "@ember/helper";
 import { on } from "@ember/modifier";
-import { and } from "truth-helpers";
+import { and, or } from "truth-helpers";
 import { addObserver, removeObserver } from "@ember/object/observers";
 import { getOwner } from "@ember/owner";
 import { schedule } from "@ember/runloop";
@@ -81,6 +81,10 @@ export default class TopicPreviewModal extends Component {
   @tracked loading = true;
   @tracked loadingMore = false;
   @tracked loadingAbove = false;
+  // True while jumpToPost() is mid-flight (postStream.refresh + settle) for
+  // a jump far enough that the current window gets fully replaced - drives
+  // the same skeleton used for the initial load. See showSkeleton below.
+  @tracked jumpingToPost = false;
   @tracked topicModel = null;
   @tracked initialPositioning = true;
   @tracked showExtraWidgets = false;
@@ -538,7 +542,7 @@ export default class TopicPreviewModal extends Component {
   // Skeleton during network load AND first positioning (prefetch can
   // resolve before first paint otherwise).
   get showSkeleton() {
-    return this.loading || this.initialPositioning;
+    return this.loading || this.initialPositioning || this.jumpingToPost;
   }
 
   get skeletonItems() {
@@ -1304,8 +1308,44 @@ export default class TopicPreviewModal extends Component {
   };
 
   jumpToPost = async (postNumber) => {
-    await this.postStream?.refresh({ nearPost: postNumber });
-    this.scrollToPost(postNumber);
+    // If the target post is already mounted (loaded window just happens to
+    // include it, e.g. it's a screen or two away), this is going to resolve
+    // near-instantly either way - skip the skeleton so it doesn't flash for
+    // what's really just a scroll. Same DOM check scrollToPost itself polls
+    // for below, so "already loaded" means the same thing in both places.
+    const alreadyLoaded = !!document.querySelector(
+      `.topic-preview-modal [data-post-number="${postNumber}"]`
+    );
+
+    if (!alreadyLoaded) {
+      this.jumpingToPost = true;
+    }
+
+    try {
+      await this.postStream?.refresh({ nearPost: postNumber });
+
+      if (this.isDestroying || this.isDestroyed) {
+        return;
+      }
+
+      if (alreadyLoaded) {
+        // Nothing hidden behind a skeleton here, so a plain smooth scroll
+        // to wherever it lands is fine - this is the pre-skeleton behavior.
+        this.scrollToPost(postNumber);
+      } else {
+        // Non-smooth + settle-callback, same as the initial-load positioning:
+        // the skeleton is already hiding the jump, so there's nothing to
+        // animate toward - just land on the target and reveal once settled.
+        this.scrollToPost(postNumber, false, 0, () => {
+          this.jumpingToPost = false;
+        });
+      }
+    } catch (e) {
+      if (!this.isDestroying && !this.isDestroyed) {
+        this.jumpingToPost = false;
+      }
+      throw e;
+    }
   };
 
   replyToTopic = async () => {
@@ -1706,7 +1746,7 @@ export default class TopicPreviewModal extends Component {
         {{/if}}
 
         {{#unless this.loading}}
-          <div class={{if this.initialPositioning "topic-preview-modal__posts-container--hidden"}}>
+          <div class={{if (or this.initialPositioning this.jumpingToPost) "topic-preview-modal__posts-container--hidden"}}>
             {{#unless this.isNestedView}}
               {{#if this.hasMoreAbove}}
               <ConditionalLoadingSpinner @condition={{this.loadingAbove}}>
