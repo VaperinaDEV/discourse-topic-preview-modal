@@ -5,28 +5,17 @@ import { modifier } from "ember-modifier";
 // across browsers/zoom levels.
 const BOTTOM_EPSILON_PX = 4;
 
-// Scrollspy-style tracker for the progress indicator: reports the post
-// number currently occupying the "active reading" position in the scroll
-// container. Shares tracking across every element it's attached to,
-// mirroring createPostVisibilityModifier's shape.
+// Tracks the post at the active reading position for the progress indicator.
+// Shared across all attached elements, mirroring createPostVisibilityModifier.
 //
-// We deliberately don't reuse core's `topic:current-post-scrolled` appEvent
-// here: that's a *global* bus, and core's own TopicNavigation/TopicProgress
-// (on the real topic page underneath, if any) listen to the same channel.
-// Piggybacking on it from inside the modal would make our scroll position
-// drive - or fight with - the background page's progress bar whenever the
-// modal is opened while already reading a topic. Keeping our own local
-// tracker avoids that cross-talk entirely.
+// We use a local tracker instead of core's global `topic:current-post-scrolled`
+// event to prevent the modal's scroll position from affecting the background
+// topic's progress bar.
 //
-// The "current" post is found via a single-point hit-test against a
-// waterline `bandPercent` of the way down the scroll container, rather than
-// by checking which posts overlap a broad top band. Posts are stacked with
-// no gaps, so exactly one post can ever contain a given point - a broad-band
-// overlap check, by contrast, can match two posts at once right after a
-// jump (a sliver of the previous post plus the top of the target post both
-// sitting in the band a few px apart), and picking "whichever is smaller"
-// then shows the post you just left instead of the one you jumped to, until
-// you scroll far enough to clear the sliver.
+// The active post is found with a single-point hit-test at `bandPercent`
+// down the scroll container. Since posts have no gaps, exactly one post can
+// contain that point, avoiding the ambiguous overlap that a broad top-band
+// check can produce after jumps.
 export default function createProgressTrackerModifier({
   rootSelector,
   onCurrentPostChange,
@@ -87,14 +76,9 @@ export default function createProgressTrackerModifier({
       return;
     }
 
-    // In a full topic page there's always enough content (reply box,
-    // suggested topics...) below the last post for the waterline to reach
-    // it. In this compact modal there often isn't, so the last post can sit
-    // fully on screen above the waterline without ever containing it - the
-    // progress bar would then cap one short of the real total. Scroll
-    // position itself is the reliable signal here: once you can't scroll
-    // any further, whatever is last is what you're looking at, regardless
-    // of where it sits in the viewport.
+    // Unlike full topic pages, compact modals may lack enough content below the
+    // last post for the waterline to reach it. Use the scroll limit as a fallback:
+    // when no further scrolling is possible, the last post is considered active.
     if (isAtBottom()) {
       onCurrentPostChange(maxAttached());
       return;
