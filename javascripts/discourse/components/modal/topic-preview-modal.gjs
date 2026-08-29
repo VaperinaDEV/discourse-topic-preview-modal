@@ -14,6 +14,7 @@ import replaceEmoji from "discourse/helpers/replace-emoji";
 import ConditionalLoadingSpinner from "discourse/components/conditional-loading-spinner";
 import DButton from "discourse/components/d-button";
 import DModal from "discourse/components/d-modal";
+import dPointerDrag from "discourse/ui-kit/modifiers/d-pointer-drag";
 import AnonymousFlagModal from "discourse/components/modal/anonymous-flag";
 import ChangeOwnerModal from "discourse/components/modal/change-owner";
 import ChangePostNoticeModal from "discourse/components/modal/change-post-notice";
@@ -52,6 +53,7 @@ import lazyImagesModifier from "../../modifiers/topic-preview-modal/lazy-images"
 import createNestedPostTrackerModifier from "../../modifiers/topic-preview-modal/create-nested-post-tracker-modifier";
 import createPostVisibilityModifier from "../../modifiers/topic-preview-modal/create-post-visibility-modifier";
 import createLoadMoreSentinelModifier from "../../modifiers/topic-preview-modal/create-load-more-sentinel-modifier";
+import createProgressTrackerModifier from "../../modifiers/topic-preview-modal/create-progress-tracker-modifier";
 import createSwipeUpDismissModifier from "../../modifiers/topic-preview-modal/create-swipe-up-dismiss-modifier";
 
 // One-time mobile hint that the native Back gesture/button closes this
@@ -104,6 +106,18 @@ export default class TopicPreviewModal extends Component {
 
   // First-frame render limit: cuts layout cost (network still needs forceLoad).
   @tracked renderLimit = 1;
+
+  // Post number currently in the "active reading" band near the top of the
+  // modal body, used to drive the topic-progress indicator. See
+  // ../../modifiers/topic-preview-modal/create-progress-tracker-modifier.
+  @tracked currentProgressPostNumber = null;
+
+  // Live drag/tap state for the progress bar. While scrubbing, the bar's
+  // displayed position tracks the pointer directly (pure local arithmetic,
+  // no network/scroll work) so it never stutters; the real jump (network +
+  // scroll) only fires once, on release. See onScrub* below.
+  @tracked scrubbing = false;
+  @tracked scrubIndex = null;
 
   // Local sub-modal so modal.show() does not close the topic-preview-modal.
   @tracked activeSubModal = null;
@@ -496,6 +510,7 @@ export default class TopicPreviewModal extends Component {
     this.restoreServicePatches();
     clearTimeout(this.fkMenuCloseTimer);
     this.observePost.disconnect?.();
+    this.progressTracker.disconnect?.();
     this.nestedPostTracker.disconnect?.();
     this.fkMenuObserver?.disconnect();
     removeObserver(
@@ -722,6 +737,199 @@ export default class TopicPreviewModal extends Component {
       nextPost: index < posts.length - 1 ? posts[index + 1] : null,
     }));
   }
+
+  // The Post record currently occupying the "active reading" band, per
+  // currentProgressPostNumber (see createProgressTrackerModifier).
+  get progressPost() {
+    if (!this.currentProgressPostNumber) {
+      return null;
+    }
+    return (this.postStream?.posts ?? []).find(
+      (p) =>
+        !(p instanceof Placeholder) &&
+        p.post_number === this.currentProgressPostNumber
+    );
+  }
+
+  // 1-based position in the full topic stream (matches core's
+  // postStream.progressIndexOfPost, used by the real topic-progress bar).
+  get progressPosition() {
+    const post = this.progressPost;
+    return post ? this.postStream?.progressIndexOfPost(post) : null;
+  }
+
+  get progressTotal() {
+    return this.postStream?.filteredPostsCount;
+  }
+
+  get progressPercent() {
+    if (!this.progressPosition || !this.progressTotal) {
+      return 0;
+    }
+    return Math.min(
+      100,
+      Math.max(0, (this.progressPosition / this.progressTotal) * 100)
+    );
+  }
+
+  // Mirrors core TopicProgress#hideProgress: nothing to show before the
+  // stream loads, before we know the active post, or for a short stream on
+  // desktop (matches core's hideOnShortStream).
+  get hideProgress() {
+    const hideOnShortStream =
+      this.site.desktopView && (this.progressTotal ?? 0) < 2;
+    return (
+      this.isNestedView ||
+      !this.postStream?.loaded ||
+      !this.progressPost ||
+      hideOnShortStream
+    );
+  }
+
+  // Mirrors core TopicProgress#showBackButton: true once you've scrolled
+  // above (before) your own last-read post, so there's somewhere to jump
+  // back down to.
+  get showProgressBackButton() {
+    const lastReadId = this.topicModel?.last_read_post_id;
+    const stream = this.postStream?.stream;
+    if (!lastReadId || !stream?.length || this.progressPosition == null) {
+      return false;
+    }
+    const readPos = stream.indexOf(lastReadId);
+    return (
+      readPos >= 0 &&
+      readPos < stream.length - 1 &&
+      readPos + 1 > this.progressPosition
+    );
+  }
+
+  // While actively scrubbing, the bar shows the pointer-following preview
+  // position rather than the real (scroll-driven) one - see `scrubbing`.
+  get displayPosition() {
+    if (this.scrubbing && this.scrubIndex != null) {
+      return this.scrubIndex;
+    }
+    return this.progressPosition;
+  }
+
+  get displayPercent() {
+    if (this.scrubbing && this.scrubIndex != null && this.progressTotal) {
+      return Math.min(
+        100,
+        Math.max(0, (this.scrubIndex / this.progressTotal) * 100)
+      );
+    }
+    return this.progressPercent;
+  }
+
+  // Pure local arithmetic - no DOM measurement beyond the bar's own rect, no
+  // network, no scrolling. Safe to call on every pointermove.
+  indexFromScrubEvent(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const total = this.progressTotal;
+    if (!total || !rect.width) {
+      return null;
+    }
+    const percent = Math.min(
+      1,
+      Math.max(0, (event.clientX - rect.left) / rect.width)
+    );
+    return Math.min(total, Math.max(1, Math.round(percent * total)));
+  }
+
+  onScrubStart = (event) => {
+    const index = this.indexFromScrubEvent(event);
+    if (index == null) {
+      return false;
+    }
+    this.scrubbing = true;
+    this.scrubIndex = index;
+  };
+
+  onScrubMove = (event) => {
+    const index = this.indexFromScrubEvent(event);
+    if (index != null) {
+      this.scrubIndex = index;
+    }
+  };
+
+  // Fires on release for BOTH a drag and a plain tap (a tap never crosses
+  // the drag threshold, so onDrag never ran, but onDragEnd still does) -
+  // one code path commits the real navigation either way.
+  onScrubEnd = (event) => {
+    const index = this.indexFromScrubEvent(event) ?? this.scrubIndex;
+    if (index == null) {
+      this.scrubbing = false;
+      return;
+    }
+    this.jumpToIndex(index);
+  };
+
+  onScrubCancel = () => {
+    this.scrubbing = false;
+    this.scrubIndex = null;
+  };
+
+  // Resolves a 1-based position in the full topic stream to a post_number
+  // and performs a single real jump - mirrors core TopicController's
+  // jumpToIndex → _jumpToIndex → _jumpToPostId chain (see topic.js), but
+  // reuses our own jumpToPost() for the actual navigation/scroll.
+  jumpToIndex = async (index) => {
+    const stream = this.postStream?.stream;
+    if (!stream?.length) {
+      this.scrubbing = false;
+      return;
+    }
+
+    const streamIndex = Math.max(1, Math.min(stream.length, index));
+    const postId = stream[streamIndex - 1];
+    if (!postId) {
+      this.scrubbing = false;
+      return;
+    }
+
+    try {
+      let post = this.postStream.findLoadedPost(postId);
+      if (!post) {
+        [post] = await this.postStream.findPostsByIds([postId]);
+      }
+      if (post && !this.isDestroying && !this.isDestroyed) {
+        await this.jumpToPost(post.post_number);
+      }
+    } catch (e) {
+      if (!this.isDestroying && !this.isDestroyed) {
+        popupAjaxError(e);
+      }
+    } finally {
+      if (!this.isDestroying && !this.isDestroyed) {
+        // Cleared only once the jump has actually landed, so the bar holds
+        // the target position instead of flashing back to the old one while
+        // the network request + scroll are still in flight.
+        this.scrubbing = false;
+        this.scrubIndex = null;
+      }
+    }
+  };
+
+  jumpToStart = () => this.jumpToPost(1);
+
+  jumpToEnd = () => {
+    const target = this.topicModel?.highest_post_number ?? this.progressTotal;
+    if (target) {
+      this.jumpToPost(target);
+    }
+  };
+
+  goToLastRead = () => {
+    this.jumpToPost(this.topicModel?.last_read_post_number);
+  };
+
+  progressTracker = createProgressTrackerModifier({
+    rootSelector: ".topic-preview-modal .d-modal__body",
+    onCurrentPostChange: (postNumber) => {
+      this.currentProgressPostNumber = postNumber;
+    },
+  });
 
   // Read internal flags; canAppendMore/canPrependMore flip false on load start.
   get hasMoreBelow() {
@@ -1561,6 +1769,7 @@ export default class TopicPreviewModal extends Component {
                     data-post-number={{tuple.post.post_number}}
                     {{this.observePost}}
                     {{this.lazyImages}}
+                    {{this.progressTracker}}
                   >
                     {{#let
                       (if tuple.post.isSmallAction PostSmallAction Post)
@@ -1634,6 +1843,55 @@ export default class TopicPreviewModal extends Component {
               aria-hidden="true"
             ></div>
           {{/if}}
+        {{/unless}}
+
+        {{#unless this.hideProgress}}
+          <div class="topic-preview-modal__progress-row">
+            {{#if this.showProgressBackButton}}
+              <DButton
+                class="btn-primary btn-small topic-preview-modal__progress-back"
+                @icon="arrow-down"
+                @translatedLabel={{i18n "topic.timeline.back"}}
+                @action={{this.goToLastRead}}
+              />
+            {{/if}}
+
+            <DButton
+              class="btn-flat btn-small topic-preview-modal__progress-jump"
+              @icon="backward-fast"
+              title={{i18n "topic_entrance.jump_top_button_title"}}
+              @action={{this.jumpToStart}}
+            />
+
+            <nav
+              class="topic-preview-modal__progress
+                {{if this.scrubbing '--dragging'}}"
+              title={{i18n "topic.progress.title"}}
+              aria-label={{i18n "topic.progress.title"}}
+              style={{htmlSafe (concat "--tpm-progress-width: " this.displayPercent "%")}}
+              {{dPointerDrag
+                onDragStart=this.onScrubStart
+                onDrag=this.onScrubMove
+                onDragEnd=this.onScrubEnd
+                onDragCancel=this.onScrubCancel
+              }}
+            >
+              <div class="topic-preview-modal__progress-bg"></div>
+              <div class="topic-preview-modal__progress-thumb"></div>
+              <div class="topic-preview-modal__progress-nums">
+                <span>{{this.displayPosition}}</span>
+                <span>/</span>
+                <span>{{this.progressTotal}}</span>
+              </div>
+            </nav>
+
+            <DButton
+              class="btn-flat btn-small topic-preview-modal__progress-jump"
+              @icon="forward-fast"
+              title={{i18n "topic_entrance.jump_bottom_button_title"}}
+              @action={{this.jumpToEnd}}
+            />
+          </div>
         {{/unless}}
 
         <div class="topic-preview-modal__footer-content">

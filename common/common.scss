@@ -304,6 +304,106 @@ body.topic-preview-opened {
     padding: 1em 0;
   }
 
+  &__progress-row {
+    display: flex;
+    align-items: center;
+    gap: 0.25em;
+    width: 100%;
+    margin-bottom: 0.5em;
+  }
+
+  &__progress-back {
+    flex-shrink: 0;
+  }
+
+  &__progress-jump {
+    flex-shrink: 0;
+    // DButton with no @label renders icon-only already; just make sure the
+    // hit target stays comfortable on touch.
+    padding-inline: 0.6em;
+  }
+
+  &__progress {
+    position: relative;
+    flex: 1;
+    height: 1.6em;
+    display: flex;
+    align-items: center;
+    cursor: grab;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+
+    &.--dragging {
+      cursor: grabbing;
+    }
+  }
+
+  &__progress-bg,
+  &__progress-thumb {
+    position: absolute;
+  }
+
+  &__progress-bg {
+    inset: 0;
+    border-radius: var(--d-border-radius-pill);
+    overflow: hidden;
+    background: var(--primary-low);
+
+    &::after {
+      content: "";
+      display: block;
+      height: 100%;
+      width: var(--tpm-progress-width, 0%);
+      background: var(--tertiary-low);
+      // Smoothed for normal reading-position updates, but skipped while the
+      // pointer is actively driving the value (see .--dragging below) so the
+      // fill never lags behind the finger/cursor.
+      transition: width 0.2s ease-out;
+    }
+  }
+
+  &__progress.--dragging &__progress-bg::after {
+    transition: none;
+  }
+
+  &__progress-thumb {
+    top: 50%;
+    left: var(--tpm-progress-width, 0%);
+    width: 0.8em;
+    height: 0.8em;
+    border-radius: 50%;
+    background: var(--tertiary);
+    box-shadow: 0 0 0 2px var(--secondary);
+    transform: translate(-50%, -50%);
+    transition:
+      left 0.2s ease-out,
+      transform 0.15s ease-out;
+    pointer-events: none;
+  }
+
+  &__progress.--dragging &__progress-thumb {
+    transform: translate(-50%, -50%) scale(1.3);
+    // Left tracks the pointer directly while dragging - no lag - so only
+    // the scale bump animates here.
+    transition: transform 0.15s ease-out;
+  }
+
+  &__progress-nums {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.25em;
+    height: 100%;
+    padding-inline: 0.75em;
+    font-size: var(--font-down-1);
+    font-weight: bold;
+    color: var(--tertiary);
+    pointer-events: none;
+    user-select: none;
+  }
+
   &__presence {
     position: sticky;
     bottom: 0;  
