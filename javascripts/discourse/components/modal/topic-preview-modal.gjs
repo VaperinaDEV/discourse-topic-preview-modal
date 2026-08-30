@@ -14,7 +14,8 @@ import replaceEmoji from "discourse/helpers/replace-emoji";
 import ConditionalLoadingSpinner from "discourse/components/conditional-loading-spinner";
 import DButton from "discourse/components/d-button";
 import DModal from "discourse/components/d-modal";
-import dPointerDrag from "discourse/ui-kit/modifiers/d-pointer-drag";
+import TopicPreviewModalProgressBar from "../progress-bar";
+import TopicPreviewModalProgressScrubberOverlay from "./progress-scrubber-overlay";
 import AnonymousFlagModal from "discourse/components/modal/anonymous-flag";
 import ChangeOwnerModal from "discourse/components/modal/change-owner";
 import ChangePostNoticeModal from "discourse/components/modal/change-post-notice";
@@ -81,12 +82,14 @@ export default class TopicPreviewModal extends Component {
   @tracked loading = true;
   @tracked loadingMore = false;
   @tracked loadingAbove = false;
-  // True while jumpToPost() is mid-flight (postStream.refresh + settle) for
-  // a jump far enough that the current window gets fully replaced - drives
-  // the same skeleton used for the initial load. See showSkeleton below.
-  @tracked jumpingToPost = false;
   @tracked topicModel = null;
   @tracked initialPositioning = true;
+  // True only while a jump (drag-scrub, jump-to-start/end, internal link,
+  // "back to last read"...) is waiting on postStream.refresh() to actually
+  // fetch posts from the server - i.e. the target wasn't already loaded.
+  // Reuses the exact same skeleton-over-hidden-content mechanism as
+  // initialPositioning below, so it never fights with it.
+  @tracked jumpLoading = false;
   @tracked showExtraWidgets = false;
 
   // Nested topics use core Nested + tree endpoint instead of flat PostStream.
@@ -116,12 +119,10 @@ export default class TopicPreviewModal extends Component {
   // ../../modifiers/topic-preview-modal/create-progress-tracker-modifier.
   @tracked currentProgressPostNumber = null;
 
-  // Live drag/tap state for the progress bar. While scrubbing, the bar's
-  // displayed position tracks the pointer directly (pure local arithmetic,
-  // no network/scroll work) so it never stutters; the real jump (network +
-  // scroll) only fires once, on release. See onScrub* below.
-  @tracked scrubbing = false;
-  @tracked scrubIndex = null;
+  // True while the fullscreen drag-to-jump overlay (core's real
+  // TopicTimeline, reused as-is) is open. See
+  // ../modal/progress-scrubber-overlay.
+  @tracked scrubberOpen = false;
 
   // Local sub-modal so modal.show() does not close the topic-preview-modal.
   @tracked activeSubModal = null;
@@ -539,10 +540,10 @@ export default class TopicPreviewModal extends Component {
     }, 0);
   }
 
-  // Skeleton during network load AND first positioning (prefetch can
-  // resolve before first paint otherwise).
+  // Skeleton during network load, first positioning (prefetch can resolve
+  // before first paint otherwise), and a far jump that has to fetch posts.
   get showSkeleton() {
-    return this.loading || this.initialPositioning || this.jumpingToPost;
+    return this.loading || this.initialPositioning || this.jumpLoading;
   }
 
   get skeletonItems() {
@@ -550,7 +551,12 @@ export default class TopicPreviewModal extends Component {
   }
 
   get dismissable() {
-    return !this.activeSubModal && !this.fkMenuOpen && !this.composerOpen;
+    return (
+      !this.activeSubModal &&
+      !this.fkMenuOpen &&
+      !this.composerOpen &&
+      !this.scrubberOpen
+    );
   }
 
   // Only "grip" mode shows the drag-handle hint; "gesture" uses its own
@@ -807,88 +813,36 @@ export default class TopicPreviewModal extends Component {
     );
   }
 
-  // While actively scrubbing, the bar shows the pointer-following preview
-  // position rather than the real (scroll-driven) one - see `scrubbing`.
-  get displayPosition() {
-    if (this.scrubbing && this.scrubIndex != null) {
-      return this.scrubIndex;
-    }
-    return this.progressPosition;
+  // 0-based starting position for the fullscreen scrubber overlay - matches
+  // core's own TopicTimeline `enteredIndex` convention (see
+  // topic-timeline.gjs: `prevEvent.postIndex - 1`).
+  get scrubberEnteredIndex() {
+    return Math.max(0, (this.progressPosition ?? 1) - 1);
   }
 
-  get displayPercent() {
-    if (this.scrubbing && this.scrubIndex != null && this.progressTotal) {
-      return Math.min(
-        100,
-        Math.max(0, (this.scrubIndex / this.progressTotal) * 100)
-      );
-    }
-    return this.progressPercent;
-  }
-
-  // Pure local arithmetic - no DOM measurement beyond the bar's own rect, no
-  // network, no scrolling. Safe to call on every pointermove.
-  indexFromScrubEvent(event) {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const total = this.progressTotal;
-    if (!total || !rect.width) {
-      return null;
-    }
-    const percent = Math.min(
-      1,
-      Math.max(0, (event.clientX - rect.left) / rect.width)
-    );
-    return Math.min(total, Math.max(1, Math.round(percent * total)));
-  }
-
-  onScrubStart = (event) => {
-    const index = this.indexFromScrubEvent(event);
-    if (index == null) {
-      return false;
-    }
-    this.scrubbing = true;
-    this.scrubIndex = index;
+  openScrubber = () => {
+    this.scrubberOpen = true;
   };
 
-  onScrubMove = (event) => {
-    const index = this.indexFromScrubEvent(event);
-    if (index != null) {
-      this.scrubIndex = index;
-    }
-  };
-
-  // Fires on release for BOTH a drag and a plain tap (a tap never crosses
-  // the drag threshold, so onDrag never ran, but onDragEnd still does) -
-  // one code path commits the real navigation either way.
-  onScrubEnd = (event) => {
-    const index = this.indexFromScrubEvent(event) ?? this.scrubIndex;
-    if (index == null) {
-      this.scrubbing = false;
-      return;
-    }
-    this.jumpToIndex(index);
-  };
-
-  onScrubCancel = () => {
-    this.scrubbing = false;
-    this.scrubIndex = null;
+  closeScrubber = () => {
+    this.scrubberOpen = false;
   };
 
   // Resolves a 1-based position in the full topic stream to a post_number
   // and performs a single real jump - mirrors core TopicController's
   // jumpToIndex → _jumpToIndex → _jumpToPostId chain (see topic.js), but
-  // reuses our own jumpToPost() for the actual navigation/scroll.
+  // reuses our own jumpToPost() for the actual navigation/scroll. Also the
+  // exact signature core's own TopicTimeline expects for @jumpToIndex, so
+  // the fullscreen scrubber overlay wires straight into this.
   jumpToIndex = async (index) => {
     const stream = this.postStream?.stream;
     if (!stream?.length) {
-      this.scrubbing = false;
       return;
     }
 
     const streamIndex = Math.max(1, Math.min(stream.length, index));
     const postId = stream[streamIndex - 1];
     if (!postId) {
-      this.scrubbing = false;
       return;
     }
 
@@ -903,14 +857,6 @@ export default class TopicPreviewModal extends Component {
     } catch (e) {
       if (!this.isDestroying && !this.isDestroyed) {
         popupAjaxError(e);
-      }
-    } finally {
-      if (!this.isDestroying && !this.isDestroyed) {
-        // Cleared only once the jump has actually landed, so the bar holds
-        // the target position instead of flashing back to the old one while
-        // the network request + scroll are still in flight.
-        this.scrubbing = false;
-        this.scrubIndex = null;
       }
     }
   };
@@ -1308,42 +1254,37 @@ export default class TopicPreviewModal extends Component {
   };
 
   jumpToPost = async (postNumber) => {
-    // If the target post is already mounted (loaded window just happens to
-    // include it, e.g. it's a screen or two away), this is going to resolve
-    // near-instantly either way - skip the skeleton so it doesn't flash for
-    // what's really just a scroll. Same DOM check scrollToPost itself polls
-    // for below, so "already loaded" means the same thing in both places.
-    const alreadyLoaded = !!document.querySelector(
-      `.topic-preview-modal [data-post-number="${postNumber}"]`
+    // refresh() itself resolves instantly when the post is already in the
+    // loaded window (see postStream.refresh in core) - only a real fetch
+    // deserves the skeleton, so a nearby/local jump stays flicker-free.
+    const alreadyLoaded = (this.postStream?.posts ?? []).some(
+      (p) => p.post_number === postNumber
     );
-
     if (!alreadyLoaded) {
-      this.jumpingToPost = true;
+      this.jumpLoading = true;
+      // Safety net: scrollToPost's own polling gives up silently after
+      // ~1.5s if it never finds the target element, which would otherwise
+      // leave the skeleton stuck on screen forever.
+      setTimeout(() => {
+        if (!this.isDestroying && !this.isDestroyed) {
+          this.jumpLoading = false;
+        }
+      }, 4000);
     }
 
     try {
       await this.postStream?.refresh({ nearPost: postNumber });
-
       if (this.isDestroying || this.isDestroyed) {
         return;
       }
-
-      if (alreadyLoaded) {
-        // Nothing hidden behind a skeleton here, so a plain smooth scroll
-        // to wherever it lands is fine - this is the pre-skeleton behavior.
-        this.scrollToPost(postNumber);
-      } else {
-        // Non-smooth + settle-callback, same as the initial-load positioning:
-        // the skeleton is already hiding the jump, so there's nothing to
-        // animate toward - just land on the target and reveal once settled.
-        this.scrollToPost(postNumber, false, 0, () => {
-          this.jumpingToPost = false;
-        });
-      }
+      // Cleared inside the positioned callback, not here - the new posts
+      // still have to render and scrollToPost still has to locate/position
+      // the target element before it's safe to reveal them.
+      this.scrollToPost(postNumber, true, 0, () => {
+        this.jumpLoading = false;
+      });
     } catch (e) {
-      if (!this.isDestroying && !this.isDestroyed) {
-        this.jumpingToPost = false;
-      }
+      this.jumpLoading = false;
       throw e;
     }
   };
@@ -1746,7 +1687,7 @@ export default class TopicPreviewModal extends Component {
         {{/if}}
 
         {{#unless this.loading}}
-          <div class={{if (or this.initialPositioning this.jumpingToPost) "topic-preview-modal__posts-container--hidden"}}>
+          <div class={{if (or this.initialPositioning this.jumpLoading) "topic-preview-modal__posts-container--hidden"}}>
             {{#unless this.isNestedView}}
               {{#if this.hasMoreAbove}}
               <ConditionalLoadingSpinner @condition={{this.loadingAbove}}>
@@ -1886,53 +1827,28 @@ export default class TopicPreviewModal extends Component {
         {{/unless}}
 
         {{#unless this.hideProgress}}
-          <div class="topic-preview-modal__progress-row">
-            {{#if this.showProgressBackButton}}
-              <DButton
-                class="btn-primary btn-small topic-preview-modal__progress-back"
-                @icon="arrow-down"
-                @translatedLabel={{i18n "topic.timeline.back"}}
-                @action={{this.goToLastRead}}
-              />
-            {{/if}}
-
-            <DButton
-              class="btn-flat btn-small topic-preview-modal__progress-jump"
-              @icon="backward-fast"
-              title={{i18n "topic_entrance.jump_top_button_title"}}
-              @action={{this.jumpToStart}}
-            />
-
-            <nav
-              class="topic-preview-modal__progress
-                {{if this.scrubbing '--dragging'}}"
-              title={{i18n "topic.progress.title"}}
-              aria-label={{i18n "topic.progress.title"}}
-              style={{htmlSafe (concat "--tpm-progress-width: " this.displayPercent "%")}}
-              {{dPointerDrag
-                onDragStart=this.onScrubStart
-                onDrag=this.onScrubMove
-                onDragEnd=this.onScrubEnd
-                onDragCancel=this.onScrubCancel
-              }}
-            >
-              <div class="topic-preview-modal__progress-bg"></div>
-              <div class="topic-preview-modal__progress-thumb"></div>
-              <div class="topic-preview-modal__progress-nums">
-                <span>{{this.displayPosition}}</span>
-                <span>/</span>
-                <span>{{this.progressTotal}}</span>
-              </div>
-            </nav>
-
-            <DButton
-              class="btn-flat btn-small topic-preview-modal__progress-jump"
-              @icon="forward-fast"
-              title={{i18n "topic_entrance.jump_bottom_button_title"}}
-              @action={{this.jumpToEnd}}
-            />
-          </div>
+          <TopicPreviewModalProgressBar
+            @position={{this.progressPosition}}
+            @total={{this.progressTotal}}
+            @percent={{this.progressPercent}}
+            @showBackButton={{this.showProgressBackButton}}
+            @onBack={{this.goToLastRead}}
+            @onJumpStart={{this.jumpToStart}}
+            @onJumpEnd={{this.jumpToEnd}}
+            @onOpen={{this.openScrubber}}
+          />
         {{/unless}}
+
+        {{#if this.scrubberOpen}}
+          <TopicPreviewModalProgressScrubberOverlay
+            @topicModel={{this.topicModel}}
+            @enteredIndex={{this.scrubberEnteredIndex}}
+            @onJumpToIndex={{this.jumpToIndex}}
+            @onJumpToStart={{this.jumpToStart}}
+            @onJumpToEnd={{this.jumpToEnd}}
+            @onClose={{this.closeScrubber}}
+          />
+        {{/if}}
 
         <div class="topic-preview-modal__footer-content">
           {{#if (and this.currentUser this.canCreatePost)}}
