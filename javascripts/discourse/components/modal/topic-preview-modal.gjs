@@ -1,6 +1,6 @@
 import Component from "@glimmer/component";
 import { tracked } from "@glimmer/tracking";
-import { concat, fn, hash } from "@ember/helper";
+import { concat, fn } from "@ember/helper";
 import { on } from "@ember/modifier";
 import { and, or } from "truth-helpers";
 import { addObserver, removeObserver } from "@ember/object/observers";
@@ -14,7 +14,6 @@ import replaceEmoji from "discourse/helpers/replace-emoji";
 import ConditionalLoadingSpinner from "discourse/components/conditional-loading-spinner";
 import DButton from "discourse/components/d-button";
 import DModal from "discourse/components/d-modal";
-import PluginOutlet from "discourse/components/plugin-outlet";
 import TopicPreviewModalProgressBar from "../progress-bar";
 import TopicPreviewModalProgressScrubberOverlay from "./progress-scrubber-overlay";
 import AnonymousFlagModal from "discourse/components/modal/anonymous-flag";
