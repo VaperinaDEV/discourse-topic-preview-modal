@@ -1,5 +1,7 @@
 @use "lib/viewport";
 
+$tpm-hint-fade-duration: 200ms;
+
 @if $trigger_style == "row" {
   .topic-list-item,
   .latest-topic-list-item {
@@ -114,9 +116,6 @@ body.topic-preview-opened {
     box-shadow: none;
   }
 
-  // Duration below is intentionally hardcoded rather than shared with JS -
-  // keep in sync with BACK_GESTURE_HINT_DURATION_MS in the component if
-  // you change one.
   &__back-gesture-hint {
     position: sticky;
     top: 0.5em;
@@ -134,11 +133,21 @@ body.topic-preview-opened {
     pointer-events: none;
 
     @media (prefers-reduced-motion: no-preference) {
-      animation: tpm-back-gesture-hint 10s ease forwards;
+      animation: tpm-back-gesture-hint-in $tpm-hint-fade-duration ease forwards;
     }
 
     @media (prefers-reduced-motion: reduce) {
-      animation: tpm-back-gesture-hint-reduced-motion 10s linear forwards;
+      animation: tpm-back-gesture-hint-in-reduced-motion $tpm-hint-fade-duration linear forwards;
+    }
+
+    &--fading {
+      @media (prefers-reduced-motion: no-preference) {
+        animation-name: tpm-back-gesture-hint-out;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        animation-name: tpm-back-gesture-hint-out-reduced-motion;
+      }
     }
   }
 
@@ -412,35 +421,46 @@ body.topic-preview-opened {
 }
 
 
-@keyframes tpm-back-gesture-hint {
-  0% {
+@keyframes tpm-back-gesture-hint-in {
+  from {
     opacity: 0;
     transform: translateY(-6px);
   }
 
-  12% {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes tpm-back-gesture-hint-out {
+  from {
     opacity: 1;
     transform: translateY(0);
   }
 
-  85% {
-    opacity: 1;
-    transform: translateY(0);
-  }
-
-  100% {
+  to {
     opacity: 0;
     transform: translateY(-6px);
   }
 }
 
-@keyframes tpm-back-gesture-hint-reduced-motion {
-  0%,
-  92% {
+@keyframes tpm-back-gesture-hint-in-reduced-motion {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes tpm-back-gesture-hint-out-reduced-motion {
+  from {
     opacity: 1;
   }
 
-  100% {
+  to {
     opacity: 0;
   }
 }

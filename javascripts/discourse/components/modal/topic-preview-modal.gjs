@@ -57,12 +57,16 @@ import createLoadMoreSentinelModifier from "../../modifiers/topic-preview-modal/
 import createProgressTrackerModifier from "../../modifiers/topic-preview-modal/create-progress-tracker-modifier";
 import createSwipeUpDismissModifier from "../../modifiers/topic-preview-modal/create-swipe-up-dismiss-modifier";
 
-// One-time mobile hint that the native Back gesture/button closes this
-// modal in place. Only shown in "gesture" mode and persisted in localStorage
-// for compatibility across supported Discourse versions.
+// Mobile hint that the native Back gesture/button (and swipe) closes this
+// modal in place. Only shown in "gesture" mode; by default once ever per
+// browser via localStorage, or every time when always_show_dismiss_hint
+// is enabled - see #maybeShowBackGestureHint(). How long it stays on
+// screen is configurable via dismiss_hint_duration_ms (-1 disables the
+// auto-dismiss). Its fade in/out animation is fixed and lives entirely in
+// common.scss - see the --fading class handling in #dismissBackGestureHint
+// and #handleHintAnimationEnd below.
 const BACK_GESTURE_HINT_SEEN_KEY =
   "discourse_topic_preview_modal.seen_back_gesture_hint";
-const BACK_GESTURE_HINT_DURATION_MS = 10000;
 
 export default class TopicPreviewModal extends Component {
   @service bookmarkApi;
@@ -132,6 +136,12 @@ export default class TopicPreviewModal extends Component {
 
   // One-time "Back also closes this" hint - see #maybeShowBackGestureHint.
   @tracked showBackGestureHint = false;
+  // True while the hint is playing its CSS fade-out (--fading class below);
+  // once that animation ends (#handleHintAnimationEnd) the hint is removed
+  // from the DOM entirely. Keeps the "how long is it visible for" timing in
+  // JS (dismiss_hint_duration_ms) fully separate from the "how does it
+  // animate in/out" timing, which lives only in common.scss.
+  @tracked hintFading = false;
   backGestureHintTimer = null;
 
   fkMenuObserver = null;
@@ -240,24 +250,52 @@ export default class TopicPreviewModal extends Component {
     document.addEventListener("focusin", this.handleDocumentFocusIn, true);
   }
 
-  // Shows a one-time hint in mobile "gesture" mode that Back also closes
-  // the modal. Persists via localStorage, falling back to once per session.
+  // Shows the mobile "gesture" mode hint that Back/swipe-up/swipe-down
+  // closes the modal. By default persists via localStorage (once ever,
+  // falling back to once per session if storage is unavailable);
+  // always_show_dismiss_hint skips that gate entirely, showing it on
+  // every open.
   #maybeShowBackGestureHint() {
-    try {
-      if (localStorage.getItem(BACK_GESTURE_HINT_SEEN_KEY)) {
-        return;
+    if (!settings.always_show_dismiss_hint) {
+      try {
+        if (localStorage.getItem(BACK_GESTURE_HINT_SEEN_KEY)) {
+          return;
+        }
+        localStorage.setItem(BACK_GESTURE_HINT_SEEN_KEY, "1");
+      } catch {
+        // Fall through and show it anyway - worst case it reappears on a
+        // later visit, which beats a user never being told at all.
       }
-      localStorage.setItem(BACK_GESTURE_HINT_SEEN_KEY, "1");
-    } catch {
-      // Fall through and show it anyway - worst case it reappears on a
-      // later visit, which beats a user never being told at all.
     }
 
     this.showBackGestureHint = true;
+
+    // -1 disables the auto-dismiss timer entirely - the hint then just
+    // stays until the modal closes (cleanup happens in willDestroy).
+    if (settings.dismiss_hint_duration_ms === -1) {
+      return;
+    }
+
     this.backGestureHintTimer = setTimeout(() => {
-      this.showBackGestureHint = false;
-    }, BACK_GESTURE_HINT_DURATION_MS);
+      this.#dismissBackGestureHint();
+    }, settings.dismiss_hint_duration_ms);
   }
+
+  // Kicks off the CSS fade-out (adds the --fading class) rather than
+  // yanking the hint out of the DOM immediately. #handleHintAnimationEnd
+  // removes it once that animation actually finishes.
+  #dismissBackGestureHint() {
+    this.hintFading = true;
+  }
+
+  // Fires for both the fade-in and fade-out CSS animations on the hint;
+  // only act on the fade-out one (hintFading is true while it plays).
+  handleHintAnimationEnd = () => {
+    if (this.hintFading) {
+      this.showBackGestureHint = false;
+      this.hintFading = false;
+    }
+  };
 
   handleTopicMessage = (data) => {
     if (this.isDestroying || this.isDestroyed || !data?.id) {
@@ -1651,10 +1689,14 @@ export default class TopicPreviewModal extends Component {
       <:body>
         {{#if this.showBackGestureHint}}
           <div
-            class="topic-preview-modal__back-gesture-hint"
+            class={{concat
+              "topic-preview-modal__back-gesture-hint"
+              (if this.hintFading " topic-preview-modal__back-gesture-hint--fading" "")
+            }}
             role="status"
+            {{on "animationend" this.handleHintAnimationEnd}}
           >
-            {{i18n (themePrefix "topic_preview.back_gesture_hint")}}
+            {{htmlSafe (i18n (themePrefix "topic_preview.back_gesture_hint"))}}
           </div>
         {{/if}}
 
