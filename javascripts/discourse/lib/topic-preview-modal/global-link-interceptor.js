@@ -57,7 +57,11 @@ function handleClick(event, api) {
   if (link.hasAttribute("download")) {
     return;
   }
-  if (link.closest(".topic-list-item, .topic-preview-modal")) {
+  if (
+    link.closest(
+      ".topic-list-item, .topic-preview-modal, .topic-preview-modal__scrubber-modal"
+    )
+  ) {
     return;
   }
 

@@ -59,3 +59,6 @@ en:
     open_full: "Open Full Topic"
     modal_trigger: "Preview Topic"
     back_gesture_hint: "Swipe up/down or use the back gesture/button to close"
+    close_scrubber: "Close"
+    jump_to_post_label: "Jump to post #"
+    jump_to_post_go: "Go"

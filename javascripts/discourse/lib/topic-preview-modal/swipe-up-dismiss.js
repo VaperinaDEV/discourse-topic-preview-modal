@@ -94,6 +94,10 @@ export default class TopicPreviewSwipeUpDismiss {
       this.#state = null;
       return;
     }
+    if (!this.#canDismiss?.()) {
+      this.#state = null;
+      return;
+    }
     const touch = e.touches[0];
     this.#state = {
       startX: touch.clientX,
