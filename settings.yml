@@ -29,6 +29,14 @@ modal_dismiss_gesture:
     - none
     - grip
     - gesture
+always_show_dismiss_hint:
+  default: false
+  type: bool
+dismiss_hint_duration_ms:
+  default: 10000
+  type: integer
+  min: -1
+  max: 30000
 modal_haptic_feedback:
   default: true
   type: bool

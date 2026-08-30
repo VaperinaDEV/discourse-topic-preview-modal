@@ -33,6 +33,17 @@ en:
         <strong>Grip:</strong> shows a drag handle in the modal footer.<br>
         <strong>Gesture:</strong> enables swipe-up and native Back dismissal.<br>
         Swipe-down dismissal is available in all modes.
+      always_show_dismiss_hint: >-
+        By default the mobile dismiss-gesture hint ("Swipe up/down or use
+        the back gesture/button to close") is shown once ever per browser,
+        the first time the preview modal opens. Enable this to show it every
+        time instead. Only applies when modal_dismiss_gesture is "gesture".
+      dismiss_hint_duration_ms: >-
+        How long (in milliseconds) the dismiss-gesture hint stays on screen
+        before fading out. Consider lowering this if you've enabled
+        always_show_dismiss_hint, since a 10-second hint on every open can
+        get repetitive. Set to -1 to disable the auto-dismiss entirely - the
+        hint then stays until the modal itself is closed.
       modal_haptic_feedback: >-
         Enable haptic feedback when opening and closing the preview modal on
         supported Android devices.  
