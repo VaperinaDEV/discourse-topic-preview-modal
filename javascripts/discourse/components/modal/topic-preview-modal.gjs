@@ -984,21 +984,28 @@ export default class TopicPreviewModal extends Component {
       store: this.store,
     });
 
-    this.topicModel = result.topic;
-    this.repairNestedTopicRecord(this.topicModel);
+    // Pagination returns bare roots without topic metadata. Only replace
+    // topicModel when the result has an id/slug, or deeper fetches break.
+    if (page === 0 || result.topic?.id != null) {
+      this.topicModel = result.topic;
+      this.repairNestedTopicRecord(this.topicModel);
 
-    // Record identity can change on pagination/sort — keep controller:topic in sync.
-    if (
-      this.topicController &&
-      !this.router.currentRouteName.startsWith("topic.")
-    ) {
-      this.topicController.set("model", this.topicModel);
+      // Record identity can change on pagination/sort — keep controller:topic in sync.
+      if (
+        this.topicController &&
+        !this.router.currentRouteName.startsWith("topic.")
+      ) {
+        this.topicController.set("model", this.topicModel);
+      }
     }
 
-    this.nestedOpPost = result.opPost;
-
-    // Fresh load (not pagination) — clear registry before replacing the tree.
     if (page === 0) {
+      // Same story as topicModel above: op_post is only present in the
+      // page 0 response, so don't let a page > 0 (pagination) fetch null
+      // out the OP that's already showing.
+      this.nestedOpPost = result.opPost;
+
+      // Fresh load (not pagination) — clear registry before replacing the tree.
       this.nestedPostRegistry.clear();
     }
 
@@ -1288,6 +1295,16 @@ export default class TopicPreviewModal extends Component {
     }
     event.preventDefault();
     event.stopPropagation();
+
+    // Nested view has no flat postStream, so jumpToPost() has nothing local
+    // to scroll to. Core's "Continue this thread" can also target a collapsed
+    // post outside our loaded tree, so fall back to the real topic route,
+    // using the same teardown as the "open full" button.
+    if (this.isNestedView) {
+      this.openFullAt(url.pathname + url.search);
+      return;
+    }
+
     this.jumpToPost(match.postNumber ?? 1);
   };
 
@@ -1616,6 +1633,19 @@ export default class TopicPreviewModal extends Component {
     const slug = this.topicModel?.slug || this.topic.slug;
     const topicId = this.topicId;
     const path = slug ? `/t/${slug}/${topicId}` : `/t/${topicId}`;
+    // Bare topic path — if the page under the modal is already showing
+    // this exact topic, closing the modal alone reveals the right thing,
+    // so skip the (pointless) re-transition.
+    this.openFullAt(path, { skipIfAlreadyOnTopic: true });
+  };
+
+  // Tears the modal down and transitions the underlying page to a same-
+  // topic /t/... path — optionally with a post number and/or query string
+  // (e.g. a nested "Continue this thread" ?context=0 link). Shared by the
+  // footer's "open full" button and handleInternalLinkClick's nested-view
+  // fallback above.
+  openFullAt = (path, { skipIfAlreadyOnTopic = false } = {}) => {
+    const topicId = this.topicId;
     const router = this.router;
 
     // Stop tracker immediately to avoid a last flush racing the transition.
@@ -1633,7 +1663,6 @@ export default class TopicPreviewModal extends Component {
         return;
       }
 
-      // Skip transition only if page under modal is already this exact topic.
       // currentRouteName starts with "topic." for any topic — compare ids via URL.
       const currentMatch = matchTopicLink(window.location.pathname);
       const alreadyOnThisTopic =
@@ -1641,7 +1670,7 @@ export default class TopicPreviewModal extends Component {
         currentMatch &&
         String(currentMatch.topicId) === String(topicId);
 
-      if (alreadyOnThisTopic) {
+      if (skipIfAlreadyOnTopic && alreadyOnThisTopic) {
         return;
       }
       router.transitionTo(path);
