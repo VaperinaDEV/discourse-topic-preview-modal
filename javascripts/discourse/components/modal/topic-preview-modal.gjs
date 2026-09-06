@@ -57,14 +57,6 @@ import createLoadMoreSentinelModifier from "../../modifiers/topic-preview-modal/
 import createProgressTrackerModifier from "../../modifiers/topic-preview-modal/create-progress-tracker-modifier";
 import createSwipeUpDismissModifier from "../../modifiers/topic-preview-modal/create-swipe-up-dismiss-modifier";
 
-// Mobile hint that the native Back gesture/button (and swipe) closes this
-// modal in place. Only shown in "gesture" mode; by default once ever per
-// browser via localStorage, or every time when always_show_dismiss_hint
-// is enabled - see #maybeShowBackGestureHint(). How long it stays on
-// screen is configurable via dismiss_hint_duration_ms (-1 disables the
-// auto-dismiss). Its fade in/out animation is fixed and lives entirely in
-// common.scss - see the --fading class handling in #dismissBackGestureHint
-// and #handleHintAnimationEnd below.
 const BACK_GESTURE_HINT_SEEN_KEY =
   "discourse_topic_preview_modal.seen_back_gesture_hint";
 
@@ -88,15 +80,10 @@ export default class TopicPreviewModal extends Component {
   @tracked loadingAbove = false;
   @tracked topicModel = null;
   @tracked initialPositioning = true;
-  // True only while a jump (drag-scrub, jump-to-start/end, internal link,
-  // "back to last read"...) is waiting on postStream.refresh() to actually
-  // fetch posts from the server - i.e. the target wasn't already loaded.
-  // Reuses the exact same skeleton-over-hidden-content mechanism as
-  // initialPositioning below, so it never fights with it.
+  // True while a jump waits for postStream.refresh() to fetch its target.
   @tracked jumpLoading = false;
   @tracked showExtraWidgets = false;
 
-  // Nested topics use core Nested + tree endpoint instead of flat PostStream.
   @tracked nestedRootNodes = [];
   @tracked nestedOpPost = null;
   @tracked nestedSort = null;
@@ -107,47 +94,34 @@ export default class TopicPreviewModal extends Component {
   @tracked nestedPinnedPostIds = [];
   nestedFetchedChildrenCache = new Map();
   // post_number -> Post for MessageBus updates at any tree depth.
-  // Populated via nested-replies:post-registered/unregistered appEvents
-  // (same as NestedController). OP is registered manually.
   nestedPostRegistry = new Map();
 
-  // Set once loadTopic() resolves (fresh store records may not notify getters).
   @tracked resolvedTitle = null;
   @tracked resolvedAcceptedAnswer = false;
 
-  // First-frame render limit: cuts layout cost (network still needs forceLoad).
+  // Mirrors postStream.filter for post-voting connectors.
+  @tracked postVotingFilter = null;
+
   @tracked renderLimit = 1;
 
-  // Post number currently in the "active reading" band near the top of the
-  // modal body, used to drive the topic-progress indicator. See
-  // ../../modifiers/topic-preview-modal/create-progress-tracker-modifier.
   @tracked currentProgressPostNumber = null;
 
-  // True while the fullscreen drag-to-jump overlay (core's real
-  // TopicTimeline, reused as-is) is open. See
-  // ../modal/progress-scrubber-overlay.
   @tracked scrubberOpen = false;
 
-  // Local sub-modal so modal.show() does not close the topic-preview-modal.
+  // Keeps modal.show() from closing the topic preview.
   @tracked activeSubModal = null;
 
-  // Disable dismiss while fk-d-menu / sub-modal is open (shared #modal-container).
+  // Prevent dismiss while menus/sub-modals are open.
   @tracked fkMenuOpen = false;
 
-  // One-time "Back also closes this" hint - see #maybeShowBackGestureHint.
   @tracked showBackGestureHint = false;
-  // True while the hint is playing its CSS fade-out (--fading class below);
-  // once that animation ends (#handleHintAnimationEnd) the hint is removed
-  // from the DOM entirely. Keeps the "how long is it visible for" timing in
-  // JS (dismiss_hint_duration_ms) fully separate from the "how does it
-  // animate in/out" timing, which lives only in common.scss.
+  // Remove the hint after its CSS fade-out completes.
   @tracked hintFading = false;
   backGestureHintTimer = null;
 
   fkMenuObserver = null;
   fkMenuCloseTimer = null;
   subModalResolve = null;
-  // Flag so modal.close patch knows this is our intentional close.
   selfInitiatedClose = false;
   topicController = null;
   originalTopicControllerModel = undefined;
@@ -161,7 +135,6 @@ export default class TopicPreviewModal extends Component {
 
     this.messageBus.subscribe(`/topic/${this.topicId}`, this.handleTopicMessage);
 
-    // App-wide events from core NestedPost (same as NestedController#subscribe).
     this.appEvents.on(
       "nested-replies:post-registered",
       this.handleNestedPostRegistered
@@ -171,14 +144,11 @@ export default class TopicPreviewModal extends Component {
       this.handleNestedPostUnregistered
     );
 
-    // Core components (e.g. PostBookmarkManager) read/write topic.bookmarks
-    // from controller:topic. Point it at our topicModel while modal is open.
     this.topicController = getOwner(this).lookup("controller:topic");
     if (this.topicController) {
       this.originalTopicControllerModel = this.topicController.model;
     }
 
-    // Delay loadTopic until after first paint unless PreloadStore already has data.
     if (PreloadStore.get(`topic_${this.topicId}`)) {
       this.loadTopic();
     } else {
@@ -217,17 +187,10 @@ export default class TopicPreviewModal extends Component {
       subtree: true,
     });
 
-    // Patches modal.show/close, bookmarkApi, DiscourseURL.routeTo.
-    // See ../../lib/topic-preview-modal/service-patches.js
     this.servicePatches = new TopicPreviewServicePatches(this);
 
-    // Per-post visible-time tracking → /topics/timings.
-    // See ../../lib/topic-preview-modal/timing-tracker.js
     this.timingTracker = new TopicPreviewTimingTracker(this);
 
-    // Makes mobile edge-swipe-back close the modal in place
-    // instead of navigating the underlying page. Mobile-only and gesture mode.
-    // See ../../lib/topic-preview-modal/history-back-dismiss.js
     this.historyBackDismiss = new TopicPreviewHistoryBackDismiss(
       () => this.closeModal(),
       this.router
@@ -250,11 +213,6 @@ export default class TopicPreviewModal extends Component {
     document.addEventListener("focusin", this.handleDocumentFocusIn, true);
   }
 
-  // Shows the mobile "gesture" mode hint that Back/swipe-up/swipe-down
-  // closes the modal. By default persists via localStorage (once ever,
-  // falling back to once per session if storage is unavailable);
-  // always_show_dismiss_hint skips that gate entirely, showing it on
-  // every open.
   #maybeShowBackGestureHint() {
     if (!settings.always_show_dismiss_hint) {
       try {
@@ -263,15 +221,11 @@ export default class TopicPreviewModal extends Component {
         }
         localStorage.setItem(BACK_GESTURE_HINT_SEEN_KEY, "1");
       } catch {
-        // Fall through and show it anyway - worst case it reappears on a
-        // later visit, which beats a user never being told at all.
       }
     }
 
     this.showBackGestureHint = true;
 
-    // -1 disables the auto-dismiss timer entirely - the hint then just
-    // stays until the modal closes (cleanup happens in willDestroy).
     if (settings.dismiss_hint_duration_ms === -1) {
       return;
     }
@@ -281,15 +235,10 @@ export default class TopicPreviewModal extends Component {
     }, settings.dismiss_hint_duration_ms);
   }
 
-  // Kicks off the CSS fade-out (adds the --fading class) rather than
-  // yanking the hint out of the DOM immediately. #handleHintAnimationEnd
-  // removes it once that animation actually finishes.
   #dismissBackGestureHint() {
     this.hintFading = true;
   }
 
-  // Fires for both the fade-in and fade-out CSS animations on the hint;
-  // only act on the fade-out one (hintFading is true while it plays).
   handleHintAnimationEnd = () => {
     if (this.hintFading) {
       this.showBackGestureHint = false;
@@ -313,14 +262,11 @@ export default class TopicPreviewModal extends Component {
 
     switch (data.type) {
       case "created":
-        // Incremental append (like core) — a full forceLoad refresh has no
-        // nearPost anchor and can jump the modal back to an earlier post.
         Promise.resolve(this.postStream.triggerNewPostsInStream(data.id)).catch(
           () => {}
         );
         break;
 
-      // Single-post updates: loadPost merges in place without resetting the stream window.
       case "revised":
       case "rebaked":
       case "recovered":
@@ -332,7 +278,6 @@ export default class TopicPreviewModal extends Component {
         this.postStream.loadPost(data.id).catch(() => {});
         break;
 
-      // Hard-deleted posts are no longer addressable via loadPost() (404).
       case "destroyed":
         this.postStream
           .refresh({
@@ -347,8 +292,6 @@ export default class TopicPreviewModal extends Component {
     }
   };
 
-  // Nested counterpart. Mirrors NestedController#_onMessage: roots prepend
-  // to nestedRootNodes; deeper replies via nested-replies:child-created.
   handleNestedTopicMessage(data) {
     switch (data.type) {
       case "created":
@@ -409,8 +352,6 @@ export default class TopicPreviewModal extends Component {
     );
   }
 
-  // Mirrors NestedController#isActivityLogPost — drop activity-log posts
-  // (no activity log in the modal).
   isNestedActivityLogPost(postData) {
     const postTypes = this.site.post_types;
     if (postData.post_type === postTypes.small_action) {
@@ -439,7 +380,6 @@ export default class TopicPreviewModal extends Component {
     try {
       postData = await ajax(`/posts/${data.id}.json`);
     } catch {
-      // Post may not be visible to this user.
       return;
     }
 
@@ -478,7 +418,6 @@ export default class TopicPreviewModal extends Component {
     try {
       postData = await ajax(`/posts/${data.id}.json`);
     } catch {
-      // Post may not be visible to this user.
       return;
     }
 
@@ -493,11 +432,9 @@ export default class TopicPreviewModal extends Component {
 
     const existing = this.findNestedPostById(data.id);
     if (!existing) {
-      // Not rendered yet (collapsed/unfetched subtree) — loads fresh later.
       return;
     }
 
-    // Via store so Post.munge rebuilds ActionSummary (flags stay in sync after "acted").
     const updated = this.store.createRecord("post", postData);
     existing.updateFromPost(updated);
     if (!postData.deleted_at) {
@@ -517,7 +454,6 @@ export default class TopicPreviewModal extends Component {
     }
   }
 
-  // Idempotent restore of all service patches.
   restoreServicePatches() {
     if (this.patchesRestored) {
       return;
@@ -529,7 +465,6 @@ export default class TopicPreviewModal extends Component {
         this.topicController.set("model", this.originalTopicControllerModel);
       }
     } catch {
-      // ignore
     }
   }
 
@@ -547,7 +482,9 @@ export default class TopicPreviewModal extends Component {
     );
     this.nestedPostRegistry.clear();
 
+    // Stop before transition to avoid a final timing flush racing it.
     this.timingTracker?.stop();
+    // Remove the modal history marker without traversing browser history.
     this.historyBackDismiss?.stop();
     clearTimeout(this.backGestureHintTimer);
     this.restoreServicePatches();
@@ -566,7 +503,6 @@ export default class TopicPreviewModal extends Component {
     this.releaseStaleBodyLocks();
   }
 
-  // Clear body-scroll-lock after teardown if no other modal/composer remains.
   releaseStaleBodyLocks() {
     setTimeout(() => {
       if (
@@ -578,8 +514,6 @@ export default class TopicPreviewModal extends Component {
     }, 0);
   }
 
-  // Skeleton during network load, first positioning (prefetch can resolve
-  // before first paint otherwise), and a far jump that has to fetch posts.
   get showSkeleton() {
     return this.loading || this.initialPositioning || this.jumpLoading;
   }
@@ -597,14 +531,10 @@ export default class TopicPreviewModal extends Component {
     );
   }
 
-  // Only "grip" mode shows the drag-handle hint; "gesture" uses its own
-  // upward-drag gesture, while "none" hides it. Swipe-down dismissal remains
-  // available in all modes via DModal's built-in behavior.
   get showGrip() {
     return settings.modal_dismiss_gesture === "grip";
   }
 
-  // composer.isOpen is true even when minimized (DRAFT).
   get composerOpen() {
     const state = this.composer.model?.composeState;
     return !!state && state !== Composer.DRAFT && state !== Composer.CLOSED;
@@ -619,7 +549,6 @@ export default class TopicPreviewModal extends Component {
     });
   }
 
-  // Nested passes handlers uncurried; fail-safe if post is missing/malformed.
   guardPost(post) {
     if (post && typeof post === "object" && (post.id || post.post_number)) {
       return post;
@@ -633,7 +562,6 @@ export default class TopicPreviewModal extends Component {
     this.activeSubModal = null;
   };
 
-  // Restore focus to composer after float-kit menus close (focusTrigger).
   scheduleComposerFocusGuard() {
     [150, 700].forEach((delay) => {
       setTimeout(() => {
@@ -663,7 +591,6 @@ export default class TopicPreviewModal extends Component {
     });
   }
 
-  // Capture-phase: pull focus back if a leftover focus-trap steals it.
   handleDocumentFocusIn = (event) => {
     if (!this.composerOpen || this.activeSubModal) {
       return;
@@ -690,7 +617,6 @@ export default class TopicPreviewModal extends Component {
     });
   };
 
-  // Capture lightbox keys before DModal/float-kit can swallow them.
   handleLightboxKeydown = (event) => {
     const pswp = document.querySelector(".pswp--open");
     if (!pswp) {
@@ -711,7 +637,6 @@ export default class TopicPreviewModal extends Component {
     button?.click();
   };
 
-  // Safety net when composer closes/minimizes: clear stuck sub-modal / fkMenuOpen.
   handleComposerStateChange = () => {
     const state = this.composer.model?.composeState;
     const composerGone =
@@ -730,7 +655,6 @@ export default class TopicPreviewModal extends Component {
     );
   };
 
-  // Mark close as self-initiated so the modal.close patch lets it through.
   closeModal = (...args) => {
     this.selfInitiatedClose = true;
 
@@ -786,8 +710,6 @@ export default class TopicPreviewModal extends Component {
     }));
   }
 
-  // The Post record currently occupying the "active reading" band, per
-  // currentProgressPostNumber (see createProgressTrackerModifier).
   get progressPost() {
     if (!this.currentProgressPostNumber) {
       return null;
@@ -799,8 +721,6 @@ export default class TopicPreviewModal extends Component {
     );
   }
 
-  // 1-based position in the full topic stream (matches core's
-  // postStream.progressIndexOfPost, used by the real topic-progress bar).
   get progressPosition() {
     const post = this.progressPost;
     return post ? this.postStream?.progressIndexOfPost(post) : null;
@@ -820,9 +740,6 @@ export default class TopicPreviewModal extends Component {
     );
   }
 
-  // Mirrors core TopicProgress#hideProgress: nothing to show before the
-  // stream loads, before we know the active post, or for a short stream on
-  // desktop (matches core's hideOnShortStream).
   get hideProgress() {
     const hideOnShortStream =
       this.site.desktopView && (this.progressTotal ?? 0) < 2;
@@ -834,9 +751,6 @@ export default class TopicPreviewModal extends Component {
     );
   }
 
-  // Mirrors core TopicProgress#showBackButton: true once you've scrolled
-  // above (before) your own last-read post, so there's somewhere to jump
-  // back down to.
   get showProgressBackButton() {
     const lastReadId = this.topicModel?.last_read_post_id;
     const stream = this.postStream?.stream;
@@ -851,9 +765,6 @@ export default class TopicPreviewModal extends Component {
     );
   }
 
-  // 0-based starting position for the fullscreen scrubber overlay - matches
-  // core's own TopicTimeline `enteredIndex` convention (see
-  // topic-timeline.gjs: `prevEvent.postIndex - 1`).
   get scrubberEnteredIndex() {
     return Math.max(0, (this.progressPosition ?? 1) - 1);
   }
@@ -866,12 +777,6 @@ export default class TopicPreviewModal extends Component {
     this.scrubberOpen = false;
   };
 
-  // Resolves a 1-based position in the full topic stream to a post_number
-  // and performs a single real jump - mirrors core TopicController's
-  // jumpToIndex → _jumpToIndex → _jumpToPostId chain (see topic.js), but
-  // reuses our own jumpToPost() for the actual navigation/scroll. Also the
-  // exact signature core's own TopicTimeline expects for @jumpToIndex, so
-  // the fullscreen scrubber overlay wires straight into this.
   jumpToIndex = async (index) => {
     const stream = this.postStream?.stream;
     if (!stream?.length) {
@@ -919,7 +824,6 @@ export default class TopicPreviewModal extends Component {
     },
   });
 
-  // Read internal flags; canAppendMore/canPrependMore flip false on load start.
   get hasMoreBelow() {
     return !!(this.postStream?.hasPosts && this.postStream?.lastPostNotLoaded);
   }
@@ -932,8 +836,6 @@ export default class TopicPreviewModal extends Component {
 
   @tracked canCreatePost = false;
 
-  // createRecord skips Topic#updateFromJson fixups: re-parent details.topic
-  // and wrap bookmarks as Bookmark instances (core nested route has same gap).
   repairNestedTopicRecord(topic) {
     if (!topic) {
       return;
@@ -952,7 +854,6 @@ export default class TopicPreviewModal extends Component {
       );
     }
   }
-
 
   async loadNestedRoots({ page = 0, sort = null } = {}) {
     const slug = this.topicModel?.slug || this.topic.slug;
@@ -990,7 +891,6 @@ export default class TopicPreviewModal extends Component {
       this.topicModel = result.topic;
       this.repairNestedTopicRecord(this.topicModel);
 
-      // Record identity can change on pagination/sort — keep controller:topic in sync.
       if (
         this.topicController &&
         !this.router.currentRouteName.startsWith("topic.")
@@ -1000,16 +900,11 @@ export default class TopicPreviewModal extends Component {
     }
 
     if (page === 0) {
-      // Same story as topicModel above: op_post is only present in the
-      // page 0 response, so don't let a page > 0 (pagination) fetch null
-      // out the OP that's already showing.
       this.nestedOpPost = result.opPost;
 
-      // Fresh load (not pagination) — clear registry before replacing the tree.
       this.nestedPostRegistry.clear();
     }
 
-    // OP is not rendered by NestedPost — register manually (+ postStream).
     if (this.nestedOpPost?.post_number != null) {
       this.nestedPostRegistry.set(
         this.nestedOpPost.post_number,
@@ -1067,7 +962,6 @@ export default class TopicPreviewModal extends Component {
     }
   };
 
-  // Shared nested-load tail (fast path when known nested, or after flat detect).
   async finishNestedLoad() {
     await this.loadNestedRoots({ page: 0 });
 
@@ -1086,7 +980,6 @@ export default class TopicPreviewModal extends Component {
 
   async loadTopic() {
     try {
-      // Explicit post number from link (e.g. /t/slug/123/7) wins over last-read.
       const explicitPostNumber = this.args.model.postNumber;
       const lastRead = this.topic.last_read_post_number ?? 0;
       const highestPostNumber = this.topic.highest_post_number ?? 1;
@@ -1103,7 +996,6 @@ export default class TopicPreviewModal extends Component {
         this.topicController?.set("model", this.topicModel);
       }
 
-      // Fast path: skip flat postStream fetch when topic is already known nested.
       const knownNestedHint =
         this.topic?.is_nested_view ?? this.topic?.nested_topic;
 
@@ -1111,7 +1003,6 @@ export default class TopicPreviewModal extends Component {
         return await this.finishNestedLoad();
       }
 
-      // forceLoad required: store may return a stale identity-map instance.
       await this.postStream.refresh({
         forceLoad: true,
         track_visit: true,
@@ -1132,7 +1023,6 @@ export default class TopicPreviewModal extends Component {
         return;
       }
 
-      // Explicit @tracked copy — fresh store records may not notify the title getter.
       this.resolvedTitle =
         this.topicModel?.fancy_title ?? this.topicModel?.title ?? null;
       this.resolvedAcceptedAnswer = !!this.topicModel?.accepted_answer;
@@ -1143,7 +1033,6 @@ export default class TopicPreviewModal extends Component {
         this.postStream?.closestPostNumberFor?.(initialPostNumber) ??
         initialPostNumber;
 
-      // Render only up to target post on first frame; rest after paint.
       const targetIndex = (this.postStream?.posts ?? [])
         .filter((post) => !(post instanceof Placeholder))
         .findIndex((post) => post.post_number === targetPostNumber);
@@ -1230,7 +1119,6 @@ export default class TopicPreviewModal extends Component {
     }
   };
 
-  // Manual scroll so the page itself does not move.
   scrollWithinModal(el, smooth = true) {
     const scroller = document.querySelector(
       ".topic-preview-modal .d-modal__body"
@@ -1296,10 +1184,6 @@ export default class TopicPreviewModal extends Component {
     event.preventDefault();
     event.stopPropagation();
 
-    // Nested view has no flat postStream, so jumpToPost() has nothing local
-    // to scroll to. Core's "Continue this thread" can also target a collapsed
-    // post outside our loaded tree, so fall back to the real topic route,
-    // using the same teardown as the "open full" button.
     if (this.isNestedView) {
       this.openFullAt(url.pathname + url.search);
       return;
@@ -1309,17 +1193,11 @@ export default class TopicPreviewModal extends Component {
   };
 
   jumpToPost = async (postNumber) => {
-    // refresh() itself resolves instantly when the post is already in the
-    // loaded window (see postStream.refresh in core) - only a real fetch
-    // deserves the skeleton, so a nearby/local jump stays flicker-free.
     const alreadyLoaded = (this.postStream?.posts ?? []).some(
       (p) => p.post_number === postNumber
     );
     if (!alreadyLoaded) {
       this.jumpLoading = true;
-      // Safety net: scrollToPost's own polling gives up silently after
-      // ~1.5s if it never finds the target element, which would otherwise
-      // leave the skeleton stuck on screen forever.
       setTimeout(() => {
         if (!this.isDestroying && !this.isDestroyed) {
           this.jumpLoading = false;
@@ -1332,9 +1210,6 @@ export default class TopicPreviewModal extends Component {
       if (this.isDestroying || this.isDestroyed) {
         return;
       }
-      // Cleared inside the positioned callback, not here - the new posts
-      // still have to render and scrollToPost still has to locate/position
-      // the target element before it's safe to reveal them.
       this.scrollToPost(postNumber, true, 0, () => {
         this.jumpLoading = false;
       });
@@ -1374,8 +1249,6 @@ export default class TopicPreviewModal extends Component {
     this.composer.open(opts);
   };
 
-  // Mirrors core TopicController#replyToPost: composer.open() alone does not
-  // resurrect a saved draft after the modal (and composer) was closed once.
   #loadDraftInto = async (opts) => {
     if (opts.quote) {
       return;
@@ -1388,7 +1261,6 @@ export default class TopicPreviewModal extends Component {
         opts.draftSequence = draftData.draft_sequence;
       }
     } catch {
-      // no draft — open blank
     }
   };
 
@@ -1627,43 +1499,46 @@ export default class TopicPreviewModal extends Component {
   selectBelow = () => this.openFull();
   selectReplies = (post) => this.openFull();
   cancelFilter = () => {};
-  updateTopicPageQueryParams = () => {};
+
+  // Keep the shape expected by post-voting connectors.
+  get topicPageQueryParams() {
+    return {
+      filter: this.postVotingFilter,
+      username_filters: null,
+      replies_to_post_number: null,
+      sort: null,
+      context: null,
+      collapseReplies: null,
+    };
+  }
+
+  // Sync after post-voting changes the stream filter.
+  updateTopicPageQueryParams = () => {
+    this.postVotingFilter = this.topicModel?.postStream?.filter ?? null;
+  };
 
   openFull = () => {
     const slug = this.topicModel?.slug || this.topic.slug;
     const topicId = this.topicId;
     const path = slug ? `/t/${slug}/${topicId}` : `/t/${topicId}`;
-    // Bare topic path — if the page under the modal is already showing
-    // this exact topic, closing the modal alone reveals the right thing,
-    // so skip the (pointless) re-transition.
     this.openFullAt(path, { skipIfAlreadyOnTopic: true });
   };
 
-  // Tears the modal down and transitions the underlying page to a same-
-  // topic /t/... path — optionally with a post number and/or query string
-  // (e.g. a nested "Continue this thread" ?context=0 link). Shared by the
-  // footer's "open full" button and handleInternalLinkClick's nested-view
-  // fallback above.
   openFullAt = (path, { skipIfAlreadyOnTopic = false } = {}) => {
     const topicId = this.topicId;
     const router = this.router;
 
-    // Stop tracker immediately to avoid a last flush racing the transition.
     this.timingTracker?.stop();
-    // Remove the modal's history marker before scheduling the real
-    // transition below. The cleanup must not traverse browser history.
     this.historyBackDismiss?.stop();
     this.restoreServicePatches();
     this.closeModal();
 
-    // Avoid DiscourseURL.routeTo() — navigatedToPost() expects a real topic-route
-    // PostStream and can hit refresh() on undefined. Teardown first, then transition.
+    // Use the router directly; DiscourseURL.routeTo() expects a real PostStream.
     schedule('afterRender', () => {
       if (!router) {
         return;
       }
 
-      // currentRouteName starts with "topic." for any topic — compare ids via URL.
       const currentMatch = matchTopicLink(window.location.pathname);
       const alreadyOnThisTopic =
         router.currentRouteName?.startsWith('topic.') &&
@@ -1684,7 +1559,7 @@ export default class TopicPreviewModal extends Component {
     onVisible: (postNumber) => this.timingTracker.markVisible(postNumber),
   });
 
-  // Nested counterpart to observePost + lazyImages (container-level modifier).
+  // Visibility tracker for nested posts.
   nestedPostTracker = createNestedPostTrackerModifier({
     rootSelector: ".topic-preview-modal .d-modal__body",
     onVisible: (postNumber) => this.timingTracker.markVisible(postNumber),
@@ -1861,6 +1736,7 @@ export default class TopicPreviewModal extends Component {
                         @unhidePost={{fn this.unhidePost tuple.post}}
                         @unlockPost={{fn this.unlockPost tuple.post}}
                         @cancelFilter={{this.cancelFilter}}
+                        @topicPageQueryParams={{this.topicPageQueryParams}}
                         @updateTopicPageQueryParams={{this.updateTopicPageQueryParams}}
                         @streamElement={{true}}
                       />
