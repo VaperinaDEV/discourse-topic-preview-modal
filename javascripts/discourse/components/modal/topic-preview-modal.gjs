@@ -3,7 +3,6 @@ import { tracked } from "@glimmer/tracking";
 import { concat, fn } from "@ember/helper";
 import { on } from "@ember/modifier";
 import { and, or } from "truth-helpers";
-import { addObserver, removeObserver } from "@ember/object/observers";
 import { getOwner } from "@ember/owner";
 import { schedule } from "@ember/runloop";
 import { service } from "@ember/service";
@@ -16,49 +15,31 @@ import DButton from "discourse/components/d-button";
 import DModal from "discourse/components/d-modal";
 import TopicPreviewModalProgressBar from "../progress-bar";
 import TopicPreviewModalProgressScrubberOverlay from "./progress-scrubber-overlay";
-import AnonymousFlagModal from "discourse/components/modal/anonymous-flag";
-import ChangeOwnerModal from "discourse/components/modal/change-owner";
-import ChangePostNoticeModal from "discourse/components/modal/change-post-notice";
-import FlagModal from "discourse/components/modal/flag";
-import GrantBadgeModal from "discourse/components/modal/grant-badge";
-import HistoryModal from "discourse/components/modal/history";
-import PermanentlyDeleteConfirmModal from "discourse/components/modal/permanently-delete-confirm";
-import RawEmailModal from "discourse/components/modal/raw-email";
 import Post from "discourse/components/post";
 import Nested from "discourse/components/nested";
 import PostSmallAction from "discourse/components/post/small-action";
 import PostTextSelection from "discourse/components/post-text-selection";
-import PostFlag from "discourse/lib/flag-targets/post-flag";
 import TopicPresenceDisplay from "discourse/plugins/discourse-presence/discourse/components/topic-presence-display";
-import { ajax } from "discourse/lib/ajax";
 import { popupAjaxError } from "discourse/lib/ajax-error";
 import { clearBodyLocks } from "discourse/lib/body-scroll-lock";
-import { buildQuote } from "discourse/lib/quote";
-import QuoteState from "discourse/lib/quote-state";
-import DiscourseURL from "discourse/lib/url";
-import Composer from "discourse/models/composer";
-import Draft from "discourse/models/draft";
-import Bookmark from "discourse/models/bookmark";
 import { Placeholder } from "discourse/models/post-stream";
-import { processNestedRootResponse } from "discourse/lib/nested-topic-model";
-import processNode, {
-  registerPostInTopicPostStream,
-} from "discourse/lib/process-node";
 import { i18n } from "discourse-i18n";
-import TopicPreviewServicePatches from "../../lib/topic-preview-modal/service-patches";
-import TopicPreviewTimingTracker from "../../lib/topic-preview-modal/timing-tracker";
-import TopicPreviewHistoryBackDismiss from "../../lib/topic-preview-modal/history-back-dismiss";
-import { matchTopicLink } from "../../lib/topic-preview-modal/topic-link";
-import { triggerHaptic } from "../../lib/topic-preview-modal/haptic";
-import lazyImagesModifier from "../../modifiers/topic-preview-modal/lazy-images";
-import createNestedPostTrackerModifier from "../../modifiers/topic-preview-modal/create-nested-post-tracker-modifier";
-import createPostVisibilityModifier from "../../modifiers/topic-preview-modal/create-post-visibility-modifier";
-import createLoadMoreSentinelModifier from "../../modifiers/topic-preview-modal/create-load-more-sentinel-modifier";
-import createProgressTrackerModifier from "../../modifiers/topic-preview-modal/create-progress-tracker-modifier";
-import createSwipeUpDismissModifier from "../../modifiers/topic-preview-modal/create-swipe-up-dismiss-modifier";
-
-const BACK_GESTURE_HINT_SEEN_KEY =
-  "discourse_topic_preview_modal.seen_back_gesture_hint";
+import TopicPreviewServicePatches from "../../lib/service-patches";
+import TopicPreviewTimingTracker from "../../lib/timing-tracker";
+import TopicPreviewHistoryBackDismiss from "../../lib/history-back-dismiss";
+import BackGestureHint from "../../lib/back-gesture-hint";
+import OverlayMenuWatcher from "../../lib/overlay-menu-watcher";
+import NestedTopicController from "../../lib/nested-topic-controller";
+import ProgressNavigator from "../../lib/progress-navigator";
+import TopicPreviewComposerInteractions from "../../lib/composer-interactions";
+import TopicPreviewPostActions from "../../lib/post-actions";
+import { matchTopicLink } from "../../lib/topic-link";
+import { triggerHaptic } from "../../lib/haptic";
+import lazyImagesModifier from "../../modifiers/lazy-images";
+import createNestedPostTrackerModifier from "../../modifiers/create-nested-post-tracker-modifier";
+import createPostVisibilityModifier from "../../modifiers/create-post-visibility-modifier";
+import createLoadMoreSentinelModifier from "../../modifiers/create-load-more-sentinel-modifier";
+import createSwipeUpDismissModifier from "../../modifiers/create-swipe-up-dismiss-modifier";
 
 export default class TopicPreviewModal extends Component {
   @service bookmarkApi;
@@ -84,18 +65,6 @@ export default class TopicPreviewModal extends Component {
   @tracked jumpLoading = false;
   @tracked showExtraWidgets = false;
 
-  @tracked nestedRootNodes = [];
-  @tracked nestedOpPost = null;
-  @tracked nestedSort = null;
-  @tracked nestedEffectiveSort = null;
-  @tracked nestedHasMoreRoots = false;
-  @tracked nestedPage = 0;
-  @tracked nestedLoadingMore = false;
-  @tracked nestedPinnedPostIds = [];
-  nestedFetchedChildrenCache = new Map();
-  // post_number -> Post for MessageBus updates at any tree depth.
-  nestedPostRegistry = new Map();
-
   @tracked resolvedTitle = null;
   @tracked resolvedAcceptedAnswer = false;
 
@@ -104,23 +73,21 @@ export default class TopicPreviewModal extends Component {
 
   @tracked renderLimit = 1;
 
-  @tracked currentProgressPostNumber = null;
-
-  @tracked scrubberOpen = false;
+  @tracked canCreatePost = false;
 
   // Keeps modal.show() from closing the topic preview.
   @tracked activeSubModal = null;
 
-  // Prevent dismiss while menus/sub-modals are open.
-  @tracked fkMenuOpen = false;
+  // Delegates: each owns one concern and reads/writes the tracked state
+  // above (and each other's public state) via the `component` reference
+  // it's constructed with.
+  nested = new NestedTopicController(this);
+  progressNav = new ProgressNavigator(this);
+  composerInteractions = new TopicPreviewComposerInteractions(this);
+  postActions = new TopicPreviewPostActions(this);
+  overlayWatcher = new OverlayMenuWatcher(this);
+  backGestureHint = new BackGestureHint();
 
-  @tracked showBackGestureHint = false;
-  // Remove the hint after its CSS fade-out completes.
-  @tracked hintFading = false;
-  backGestureHintTimer = null;
-
-  fkMenuObserver = null;
-  fkMenuCloseTimer = null;
   subModalResolve = null;
   selfInitiatedClose = false;
   topicController = null;
@@ -137,11 +104,11 @@ export default class TopicPreviewModal extends Component {
 
     this.appEvents.on(
       "nested-replies:post-registered",
-      this.handleNestedPostRegistered
+      this.nested.handlePostRegistered
     );
     this.appEvents.on(
       "nested-replies:post-unregistered",
-      this.handleNestedPostUnregistered
+      this.nested.handlePostUnregistered
     );
 
     this.topicController = getOwner(this).lookup("controller:topic");
@@ -155,37 +122,7 @@ export default class TopicPreviewModal extends Component {
       requestAnimationFrame(() => this.loadTopic());
     }
 
-    let fkCheckScheduled = false;
-
-    this.fkMenuObserver = new MutationObserver(() => {
-      if (fkCheckScheduled) {
-        return;
-      }
-      fkCheckScheduled = true;
-      requestAnimationFrame(() => {
-        fkCheckScheduled = false;
-        if (this.isDestroying || this.isDestroyed) {
-          return;
-        }
-        const isOpen = !!document.querySelector(
-          ".fk-d-menu, .fk-d-menu-modal, .fk-d-tooltip, .pswp--open, #reply-control.open"
-        );
-        if (isOpen) {
-          clearTimeout(this.fkMenuCloseTimer);
-          this.fkMenuOpen = true;
-        } else if (this.fkMenuOpen) {
-          clearTimeout(this.fkMenuCloseTimer);
-          this.fkMenuCloseTimer = setTimeout(() => {
-            this.fkMenuOpen = false;
-          }, 400);
-        }
-      });
-    });
-
-    this.fkMenuObserver.observe(document.body, {
-      childList: true,
-      subtree: true,
-    });
+    this.overlayWatcher.start();
 
     this.servicePatches = new TopicPreviewServicePatches(this);
 
@@ -200,50 +137,74 @@ export default class TopicPreviewModal extends Component {
       settings.modal_dismiss_gesture === "gesture"
     ) {
       this.historyBackDismiss.start();
-      this.#maybeShowBackGestureHint();
+      this.backGestureHint.maybeShow();
     }
 
-    addObserver(
-      this.composer,
-      "model.composeState",
-      this.handleComposerStateChange
-    );
+    this.composerInteractions.start();
 
     document.addEventListener("keydown", this.handleLightboxKeydown, true);
-    document.addEventListener("focusin", this.handleDocumentFocusIn, true);
   }
 
-  #maybeShowBackGestureHint() {
-    if (!settings.always_show_dismiss_hint) {
-      try {
-        if (localStorage.getItem(BACK_GESTURE_HINT_SEEN_KEY)) {
-          return;
-        }
-        localStorage.setItem(BACK_GESTURE_HINT_SEEN_KEY, "1");
-      } catch {
+  willDestroy() {
+    super.willDestroy(...arguments);
+
+    this.messageBus.unsubscribe(`/topic/${this.topicId}`, this.handleTopicMessage);
+    this.appEvents.off(
+      "nested-replies:post-registered",
+      this.nested.handlePostRegistered
+    );
+    this.appEvents.off(
+      "nested-replies:post-unregistered",
+      this.nested.handlePostUnregistered
+    );
+    this.nested.postRegistry.clear();
+
+    // Stop before transition to avoid a final timing flush racing it.
+    this.timingTracker?.stop();
+    // Remove the modal history marker without traversing browser history.
+    this.historyBackDismiss?.stop();
+    this.backGestureHint.stop();
+    this.restoreServicePatches();
+    this.overlayWatcher.stop();
+    this.observePost.disconnect?.();
+    this.progressNav.progressTracker.disconnect?.();
+    this.nestedPostTracker.disconnect?.();
+    this.composerInteractions.stop();
+    document.removeEventListener("keydown", this.handleLightboxKeydown, true);
+    this.releaseStaleBodyLocks();
+  }
+
+  releaseStaleBodyLocks() {
+    setTimeout(() => {
+      if (
+        !document.querySelector(".d-modal") &&
+        !document.querySelector("#reply-control.open")
+      ) {
+        clearBodyLocks();
       }
-    }
+    }, 0);
+  }
 
-    this.showBackGestureHint = true;
-
-    if (settings.dismiss_hint_duration_ms === -1) {
+  // Lightbox (PhotoSwipe) doesn't stop propagation on its own, so Escape
+  // and the arrow keys would otherwise also reach the modal/composer.
+  handleLightboxKeydown = (event) => {
+    const pswp = document.querySelector(".pswp--open");
+    if (!pswp) {
       return;
     }
-
-    this.backGestureHintTimer = setTimeout(() => {
-      this.#dismissBackGestureHint();
-    }, settings.dismiss_hint_duration_ms);
-  }
-
-  #dismissBackGestureHint() {
-    this.hintFading = true;
-  }
-
-  handleHintAnimationEnd = () => {
-    if (this.hintFading) {
-      this.showBackGestureHint = false;
-      this.hintFading = false;
+    let button;
+    if (event.key === "Escape") {
+      button = pswp.querySelector(".pswp__button--close");
+    } else if (event.key === "ArrowRight") {
+      button = pswp.querySelector(".pswp__button--arrow--next");
+    } else if (event.key === "ArrowLeft") {
+      button = pswp.querySelector(".pswp__button--arrow--prev");
+    } else {
+      return;
     }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    button?.click();
   };
 
   handleTopicMessage = (data) => {
@@ -252,7 +213,7 @@ export default class TopicPreviewModal extends Component {
     }
 
     if (this.isNestedView) {
-      this.handleNestedTopicMessage(data);
+      this.nested.handleTopicMessage(data);
       return;
     }
 
@@ -292,168 +253,6 @@ export default class TopicPreviewModal extends Component {
     }
   };
 
-  handleNestedTopicMessage(data) {
-    switch (data.type) {
-      case "created":
-        this.handleNestedPostCreated(data).catch(() => {});
-        break;
-
-      case "revised":
-      case "rebaked":
-      case "recovered":
-      case "acted":
-      case "read":
-      case "liked":
-      case "unliked":
-        this.handleNestedPostChanged(data).catch(() => {});
-        break;
-
-      case "deleted":
-        this.markNestedPostDeletedLocally(data.id);
-        break;
-
-      default:
-        break;
-    }
-  }
-
-  handleNestedPostRegistered = (post) => {
-    if (
-      post?.post_number != null &&
-      this.topicId != null &&
-      String(post.topic?.id) === String(this.topicId)
-    ) {
-      this.nestedPostRegistry.set(post.post_number, post);
-    }
-  };
-
-  handleNestedPostUnregistered = (post) => {
-    if (
-      post?.post_number != null &&
-      this.nestedPostRegistry.get(post.post_number) === post
-    ) {
-      this.nestedPostRegistry.delete(post.post_number);
-    }
-  };
-
-  findNestedPostById(postId) {
-    for (const post of this.nestedPostRegistry.values()) {
-      if (post.id === postId) {
-        return post;
-      }
-    }
-    return null;
-  }
-
-  nestedPostBelongsToTopic(postData) {
-    return (
-      postData?.topic_id != null &&
-      String(postData.topic_id) === String(this.topicId)
-    );
-  }
-
-  isNestedActivityLogPost(postData) {
-    const postTypes = this.site.post_types;
-    if (postData.post_type === postTypes.small_action) {
-      return true;
-    }
-    if (postData.post_type === postTypes.whisper && postData.action_code) {
-      return true;
-    }
-    return false;
-  }
-
-  isNestedPostKnown(postId) {
-    if (this.nestedRootNodes.some((node) => node.post.id === postId)) {
-      return true;
-    }
-    return !!this.findNestedPostById(postId);
-  }
-
-  async handleNestedPostCreated(data) {
-    if (this.isNestedPostKnown(data.id)) {
-      return;
-    }
-
-    const topicId = this.topicId;
-    let postData;
-    try {
-      postData = await ajax(`/posts/${data.id}.json`);
-    } catch {
-      return;
-    }
-
-    if (
-      this.isDestroying ||
-      this.isDestroyed ||
-      this.topicId !== topicId ||
-      !this.nestedPostBelongsToTopic(postData) ||
-      this.isNestedActivityLogPost(postData) ||
-      this.isNestedPostKnown(postData.id)
-    ) {
-      return;
-    }
-
-    const node = processNode(this.store, this.topicModel, {
-      ...postData,
-      children: [],
-    });
-    const replyTo = postData.reply_to_post_number;
-    const isRoot = !replyTo || replyTo === 1;
-
-    if (isRoot) {
-      this.nestedRootNodes = [node, ...this.nestedRootNodes];
-    } else {
-      this.appEvents.trigger("nested-replies:child-created", {
-        topicId,
-        post: node.post,
-        parentPostNumber: replyTo,
-      });
-    }
-  }
-
-  async handleNestedPostChanged(data) {
-    const topicId = this.topicId;
-    let postData;
-    try {
-      postData = await ajax(`/posts/${data.id}.json`);
-    } catch {
-      return;
-    }
-
-    if (
-      this.isDestroying ||
-      this.isDestroyed ||
-      this.topicId !== topicId ||
-      !this.nestedPostBelongsToTopic(postData)
-    ) {
-      return;
-    }
-
-    const existing = this.findNestedPostById(data.id);
-    if (!existing) {
-      return;
-    }
-
-    const updated = this.store.createRecord("post", postData);
-    existing.updateFromPost(updated);
-    if (!postData.deleted_at) {
-      existing.set("deleted_post_placeholder", false);
-    }
-  }
-
-  markNestedPostDeletedLocally(postId) {
-    const post = this.findNestedPostById(postId);
-    if (!post) {
-      return;
-    }
-    post.set("deleted_at", new Date());
-    post.set("deleted_post_placeholder", true);
-    if (!this.currentUser?.staff) {
-      post.set("cooked", "");
-    }
-  }
-
   restoreServicePatches() {
     if (this.patchesRestored) {
       return;
@@ -468,52 +267,6 @@ export default class TopicPreviewModal extends Component {
     }
   }
 
-  willDestroy() {
-    super.willDestroy(...arguments);
-
-    this.messageBus.unsubscribe(`/topic/${this.topicId}`, this.handleTopicMessage);
-    this.appEvents.off(
-      "nested-replies:post-registered",
-      this.handleNestedPostRegistered
-    );
-    this.appEvents.off(
-      "nested-replies:post-unregistered",
-      this.handleNestedPostUnregistered
-    );
-    this.nestedPostRegistry.clear();
-
-    // Stop before transition to avoid a final timing flush racing it.
-    this.timingTracker?.stop();
-    // Remove the modal history marker without traversing browser history.
-    this.historyBackDismiss?.stop();
-    clearTimeout(this.backGestureHintTimer);
-    this.restoreServicePatches();
-    clearTimeout(this.fkMenuCloseTimer);
-    this.observePost.disconnect?.();
-    this.progressTracker.disconnect?.();
-    this.nestedPostTracker.disconnect?.();
-    this.fkMenuObserver?.disconnect();
-    removeObserver(
-      this.composer,
-      "model.composeState",
-      this.handleComposerStateChange
-    );
-    document.removeEventListener("keydown", this.handleLightboxKeydown, true);
-    document.removeEventListener("focusin", this.handleDocumentFocusIn, true);
-    this.releaseStaleBodyLocks();
-  }
-
-  releaseStaleBodyLocks() {
-    setTimeout(() => {
-      if (
-        !document.querySelector(".d-modal") &&
-        !document.querySelector("#reply-control.open")
-      ) {
-        clearBodyLocks();
-      }
-    }, 0);
-  }
-
   get showSkeleton() {
     return this.loading || this.initialPositioning || this.jumpLoading;
   }
@@ -525,22 +278,15 @@ export default class TopicPreviewModal extends Component {
   get dismissable() {
     return (
       !this.activeSubModal &&
-      !this.fkMenuOpen &&
-      !this.composerOpen &&
-      !this.scrubberOpen
+      !this.overlayWatcher.open &&
+      !this.composerInteractions.composerOpen &&
+      !this.progressNav.scrubberOpen
     );
   }
 
   get showGrip() {
     return settings.modal_dismiss_gesture === "grip";
   }
-
-  get composerOpen() {
-    const state = this.composer.model?.composeState;
-    return !!state && state !== Composer.DRAFT && state !== Composer.CLOSED;
-  }
-
-  quoteState = new QuoteState();
 
   showSubModal(component, model) {
     this.activeSubModal = { component, model };
@@ -549,110 +295,10 @@ export default class TopicPreviewModal extends Component {
     });
   }
 
-  guardPost(post) {
-    if (post && typeof post === "object" && (post.id || post.post_number)) {
-      return post;
-    }
-    return null;
-  }
-
   closeSubModal = (data) => {
     this.subModalResolve?.(data);
     this.subModalResolve = null;
     this.activeSubModal = null;
-  };
-
-  scheduleComposerFocusGuard() {
-    [150, 700].forEach((delay) => {
-      setTimeout(() => {
-        if (this.isDestroying || this.isDestroyed || !this.composerOpen) {
-          return;
-        }
-        if (
-          this.activeSubModal ||
-          document.querySelector(".fk-d-menu, .fk-d-menu-modal, .fk-d-tooltip")
-        ) {
-          return;
-        }
-        const composerEl = document.querySelector("#reply-control");
-        if (!composerEl) {
-          return;
-        }
-        const active = document.activeElement;
-        if (active && composerEl.contains(active)) {
-          return;
-        }
-        if (typeof this.composer.focusComposer === "function") {
-          this.composer.focusComposer();
-        } else {
-          composerEl.querySelector("textarea.d-editor-input")?.focus();
-        }
-      }, delay);
-    });
-  }
-
-  handleDocumentFocusIn = (event) => {
-    if (!this.composerOpen || this.activeSubModal) {
-      return;
-    }
-    const composerEl = document.querySelector("#reply-control");
-    if (!composerEl || composerEl.contains(event.target)) {
-      return;
-    }
-    const legitPopup = document.querySelector(
-      ".fk-d-menu, .fk-d-menu-modal, .fk-d-tooltip"
-    );
-    if (legitPopup?.contains(event.target)) {
-      return;
-    }
-    schedule("afterRender", () => {
-      if (this.isDestroying || this.isDestroyed || !this.composerOpen) {
-        return;
-      }
-      if (typeof this.composer.focusComposer === "function") {
-        this.composer.focusComposer();
-      } else {
-        composerEl.querySelector("textarea.d-editor-input")?.focus();
-      }
-    });
-  };
-
-  handleLightboxKeydown = (event) => {
-    const pswp = document.querySelector(".pswp--open");
-    if (!pswp) {
-      return;
-    }
-    let button;
-    if (event.key === "Escape") {
-      button = pswp.querySelector(".pswp__button--close");
-    } else if (event.key === "ArrowRight") {
-      button = pswp.querySelector(".pswp__button--arrow--next");
-    } else if (event.key === "ArrowLeft") {
-      button = pswp.querySelector(".pswp__button--arrow--prev");
-    } else {
-      return;
-    }
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    button?.click();
-  };
-
-  handleComposerStateChange = () => {
-    const state = this.composer.model?.composeState;
-    const composerGone =
-      !state || state === Composer.CLOSED || state === Composer.DRAFT;
-    if (!composerGone) {
-      window.getSelection()?.removeAllRanges();
-      this.scheduleComposerFocusGuard();
-      return;
-    }
-    if (this.activeSubModal) {
-      this.closeSubModal();
-    }
-    clearTimeout(this.fkMenuCloseTimer);
-    this.fkMenuOpen = !!document.querySelector(
-      ".fk-d-menu, .fk-d-menu-modal, .fk-d-tooltip, .pswp--open, #reply-control.open"
-    );
   };
 
   closeModal = (...args) => {
@@ -710,120 +356,6 @@ export default class TopicPreviewModal extends Component {
     }));
   }
 
-  get progressPost() {
-    if (!this.currentProgressPostNumber) {
-      return null;
-    }
-    return (this.postStream?.posts ?? []).find(
-      (p) =>
-        !(p instanceof Placeholder) &&
-        p.post_number === this.currentProgressPostNumber
-    );
-  }
-
-  get progressPosition() {
-    const post = this.progressPost;
-    return post ? this.postStream?.progressIndexOfPost(post) : null;
-  }
-
-  get progressTotal() {
-    return this.postStream?.filteredPostsCount;
-  }
-
-  get progressPercent() {
-    if (!this.progressPosition || !this.progressTotal) {
-      return 0;
-    }
-    return Math.min(
-      100,
-      Math.max(0, (this.progressPosition / this.progressTotal) * 100)
-    );
-  }
-
-  get hideProgress() {
-    const hideOnShortStream =
-      this.site.desktopView && (this.progressTotal ?? 0) < 2;
-    return (
-      this.isNestedView ||
-      !this.postStream?.loaded ||
-      !this.progressPost ||
-      hideOnShortStream
-    );
-  }
-
-  get showProgressBackButton() {
-    const lastReadId = this.topicModel?.last_read_post_id;
-    const stream = this.postStream?.stream;
-    if (!lastReadId || !stream?.length || this.progressPosition == null) {
-      return false;
-    }
-    const readPos = stream.indexOf(lastReadId);
-    return (
-      readPos >= 0 &&
-      readPos < stream.length - 1 &&
-      readPos + 1 > this.progressPosition
-    );
-  }
-
-  get scrubberEnteredIndex() {
-    return Math.max(0, (this.progressPosition ?? 1) - 1);
-  }
-
-  openScrubber = () => {
-    this.scrubberOpen = true;
-  };
-
-  closeScrubber = () => {
-    this.scrubberOpen = false;
-  };
-
-  jumpToIndex = async (index) => {
-    const stream = this.postStream?.stream;
-    if (!stream?.length) {
-      return;
-    }
-
-    const streamIndex = Math.max(1, Math.min(stream.length, index));
-    const postId = stream[streamIndex - 1];
-    if (!postId) {
-      return;
-    }
-
-    try {
-      let post = this.postStream.findLoadedPost(postId);
-      if (!post) {
-        [post] = await this.postStream.findPostsByIds([postId]);
-      }
-      if (post && !this.isDestroying && !this.isDestroyed) {
-        await this.jumpToPost(post.post_number);
-      }
-    } catch (e) {
-      if (!this.isDestroying && !this.isDestroyed) {
-        popupAjaxError(e);
-      }
-    }
-  };
-
-  jumpToStart = () => this.jumpToPost(1);
-
-  jumpToEnd = () => {
-    const target = this.topicModel?.highest_post_number ?? this.progressTotal;
-    if (target) {
-      this.jumpToPost(target);
-    }
-  };
-
-  goToLastRead = () => {
-    this.jumpToPost(this.topicModel?.last_read_post_number);
-  };
-
-  progressTracker = createProgressTrackerModifier({
-    rootSelector: ".topic-preview-modal .d-modal__body",
-    onCurrentPostChange: (postNumber) => {
-      this.currentProgressPostNumber = postNumber;
-    },
-  });
-
   get hasMoreBelow() {
     return !!(this.postStream?.hasPosts && this.postStream?.lastPostNotLoaded);
   }
@@ -832,150 +364,6 @@ export default class TopicPreviewModal extends Component {
     return !!(
       this.postStream?.hasPosts && this.postStream?.firstPostNotLoaded
     );
-  }
-
-  @tracked canCreatePost = false;
-
-  repairNestedTopicRecord(topic) {
-    if (!topic) {
-      return;
-    }
-
-    if (topic.details && topic.details.topic !== topic) {
-      topic.details.set("topic", topic);
-    }
-
-    if (topic.bookmarks?.length) {
-      topic.set(
-        "bookmarks",
-        topic.bookmarks.map((bookmark) =>
-          bookmark instanceof Bookmark ? bookmark : Bookmark.create(bookmark)
-        )
-      );
-    }
-  }
-
-  async loadNestedRoots({ page = 0, sort = null } = {}) {
-    const slug = this.topicModel?.slug || this.topic.slug;
-    const topicId = this.topicId;
-    const resolvedSort =
-      sort ||
-      this.nestedSort ||
-      this.siteSettings.nested_replies_default_sort ||
-      "top";
-
-    const params = new URLSearchParams({
-      page: String(page),
-      sort: resolvedSort,
-    });
-
-    const data = await ajax(
-      `/n/${slug || "-"}/${topicId}.json?${params.toString()}`
-    );
-
-    if (this.isDestroying || this.isDestroyed) {
-      return;
-    }
-
-    const result = processNestedRootResponse({
-      data,
-      params: { post_number: null, context: null },
-      site: this.site,
-      siteSettings: this.siteSettings,
-      store: this.store,
-    });
-
-    // Pagination returns bare roots without topic metadata. Only replace
-    // topicModel when the result has an id/slug, or deeper fetches break.
-    if (page === 0 || result.topic?.id != null) {
-      this.topicModel = result.topic;
-      this.repairNestedTopicRecord(this.topicModel);
-
-      if (
-        this.topicController &&
-        !this.router.currentRouteName.startsWith("topic.")
-      ) {
-        this.topicController.set("model", this.topicModel);
-      }
-    }
-
-    if (page === 0) {
-      this.nestedOpPost = result.opPost;
-
-      this.nestedPostRegistry.clear();
-    }
-
-    if (this.nestedOpPost?.post_number != null) {
-      this.nestedPostRegistry.set(
-        this.nestedOpPost.post_number,
-        this.nestedOpPost
-      );
-    }
-    if (this.nestedOpPost && this.topicModel?.postStream) {
-      registerPostInTopicPostStream(this.topicModel, this.nestedOpPost);
-    }
-
-    this.nestedRootNodes =
-      page === 0 ? result.rootNodes : [...this.nestedRootNodes, ...result.rootNodes];
-    this.nestedPage = result.page;
-    this.nestedHasMoreRoots = result.hasMoreRoots;
-    this.nestedSort = result.sort;
-    this.nestedEffectiveSort = result.effectiveSort;
-    this.nestedPinnedPostIds = result.pinnedPostIds || [];
-  }
-
-  loadMoreNestedRoots = async () => {
-    if (this.nestedLoadingMore || !this.nestedHasMoreRoots) {
-      return;
-    }
-
-    this.nestedLoadingMore = true;
-    try {
-      await this.loadNestedRoots({
-        page: this.nestedPage + 1,
-        sort: this.nestedSort,
-      });
-    } finally {
-      if (!this.isDestroying && !this.isDestroyed) {
-        this.nestedLoadingMore = false;
-      }
-    }
-  };
-
-  changeNestedSort = async (sort) => {
-    if (sort === this.nestedSort) {
-      return;
-    }
-
-    try {
-      this.nestedLoadingMore = true;
-      this.nestedFetchedChildrenCache.clear();
-      await this.loadNestedRoots({ page: 0, sort });
-    } catch (e) {
-      if (!this.isDestroying && !this.isDestroyed) {
-        popupAjaxError(e);
-      }
-    } finally {
-      if (!this.isDestroying && !this.isDestroyed) {
-        this.nestedLoadingMore = false;
-      }
-    }
-  };
-
-  async finishNestedLoad() {
-    await this.loadNestedRoots({ page: 0 });
-
-    if (this.isDestroying || this.isDestroyed) {
-      return;
-    }
-
-    this.resolvedTitle =
-      this.topicModel?.fancy_title ?? this.topicModel?.title ?? null;
-    this.resolvedAcceptedAnswer = !!this.topicModel?.accepted_answer;
-    this.canCreatePost = !!this.topicModel?.details?.can_create_post;
-    this.timingTracker.trackView();
-    this.initialPositioning = false;
-    this.showExtraWidgets = true;
   }
 
   async loadTopic() {
@@ -1000,7 +388,7 @@ export default class TopicPreviewModal extends Component {
         this.topic?.is_nested_view ?? this.topic?.nested_topic;
 
       if (knownNestedHint) {
-        return await this.finishNestedLoad();
+        return await this.nested.finishLoad();
       }
 
       await this.postStream.refresh({
@@ -1014,7 +402,7 @@ export default class TopicPreviewModal extends Component {
       }
 
       if (this.topicModel?.is_nested_view) {
-        return await this.finishNestedLoad();
+        return await this.nested.finishLoad();
       }
 
       this.timingTracker.trackView();
@@ -1038,7 +426,7 @@ export default class TopicPreviewModal extends Component {
         .findIndex((post) => post.post_number === targetPostNumber);
       this.renderLimit = Math.max(3, targetIndex + 1);
 
-      this.scrollToPost(targetPostNumber, false, 0, () => {
+      this.progressNav.scrollToPost(targetPostNumber, false, 0, () => {
         this.initialPositioning = false;
       });
 
@@ -1119,53 +507,6 @@ export default class TopicPreviewModal extends Component {
     }
   };
 
-  scrollWithinModal(el, smooth = true) {
-    const scroller = document.querySelector(
-      ".topic-preview-modal .d-modal__body"
-    );
-    if (!scroller || !el) {
-      return;
-    }
-    const scrollerRect = scroller.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    const topPadding = 12;
-    const delta = elRect.top - scrollerRect.top - topPadding;
-    scroller.scrollBy({ top: delta, behavior: smooth ? "smooth" : "auto" });
-  }
-
-  scrollToPost(postNumber, smooth = true, attempt = 0, onPositioned) {
-    schedule("afterRender", () => {
-      const el = document.querySelector(
-        `.topic-preview-modal [data-post-number="${postNumber}"]`
-      );
-
-      if (el) {
-        this.scrollWithinModal(el, smooth);
-        el.classList.add("highlighted");
-        setTimeout(() => el.classList.remove("highlighted"), 1600);
-
-        requestAnimationFrame(() => {
-          this.scrollWithinModal(el, false);
-
-          if (onPositioned) {
-            setTimeout(() => {
-              this.scrollWithinModal(el, false);
-              onPositioned();
-            }, 150);
-          } else {
-            setTimeout(() => this.scrollWithinModal(el, false), 150);
-          }
-        });
-      } else if (attempt < 15) {
-        setTimeout(
-          () =>
-            this.scrollToPost(postNumber, smooth, attempt + 1, onPositioned),
-          100
-        );
-      }
-    });
-  }
-
   handleInternalLinkClick = (event) => {
     const link = event.target.closest?.("a[href]");
     if (!link) {
@@ -1189,333 +530,12 @@ export default class TopicPreviewModal extends Component {
       return;
     }
 
-    this.jumpToPost(match.postNumber ?? 1);
+    this.progressNav.jumpToPost(match.postNumber ?? 1);
   };
 
-  jumpToPost = async (postNumber) => {
-    const alreadyLoaded = (this.postStream?.posts ?? []).some(
-      (p) => p.post_number === postNumber
-    );
-    if (!alreadyLoaded) {
-      this.jumpLoading = true;
-      setTimeout(() => {
-        if (!this.isDestroying && !this.isDestroyed) {
-          this.jumpLoading = false;
-        }
-      }, 4000);
-    }
-
-    try {
-      await this.postStream?.refresh({ nearPost: postNumber });
-      if (this.isDestroying || this.isDestroyed) {
-        return;
-      }
-      this.scrollToPost(postNumber, true, 0, () => {
-        this.jumpLoading = false;
-      });
-    } catch (e) {
-      this.jumpLoading = false;
-      throw e;
-    }
-  };
-
-  replyToTopic = async () => {
-    const opts = {
-      action: Composer.REPLY,
-      draftKey: this.topicModel?.draft_key ?? `topic_${this.topicId}`,
-      draftSequence: this.topicModel?.draft_sequence ?? 0,
-      topic: this.topicModel,
-    };
-
-    await this.#loadDraftInto(opts);
-
-    this.composer.open(opts);
-  };
-
-  replyToPost = async (post) => {
-    if (!(post = this.guardPost(post, "replyToPost"))) {
-      return;
-    }
-    const opts = {
-      action: Composer.REPLY,
-      draftKey: this.topicModel?.draft_key ?? `topic_${this.topicId}`,
-      draftSequence: this.topicModel?.draft_sequence ?? 0,
-      topic: this.topicModel,
-      post,
-    };
-
-    await this.#loadDraftInto(opts);
-
-    this.composer.open(opts);
-  };
-
-  #loadDraftInto = async (opts) => {
-    if (opts.quote) {
-      return;
-    }
-    try {
-      const draftData = await Draft.get(opts.draftKey);
-      if (draftData?.draft) {
-        const data = JSON.parse(draftData.draft);
-        opts.reply = data.reply;
-        opts.draftSequence = draftData.draft_sequence;
-      }
-    } catch {
-    }
-  };
-
-  editPost = (post) => {
-    if (!(post = this.guardPost(post, "editPost"))) {
-      return;
-    }
-    if (!this.currentUser) {
-      return this.dialog.alert(i18n("post.controls.edit_anonymous"));
-    }
-    if (!post.can_edit) {
-      return false;
-    }
-    return this.composer.open({
-      post,
-      action: Composer.EDIT,
-      draftKey: post.get("topic.draft_key"),
-      draftSequence: post.get("topic.draft_sequence"),
-    });
-  };
-
-  selectText = async () => {
-    const { postId } = this.quoteState;
-    const postStream = this.postStream;
-    const { markdown: buffer, opts } = await this.quoteState.markdown();
-    const loadedPost = postStream.findLoadedPost(postId);
-    const post = loadedPost ? loadedPost : await postStream.loadPost(postId);
-
-    const composerOpts = {
-      action: Composer.REPLY,
-      draftSequence: post.get("topic.draft_sequence"),
-      draftKey: post.get("topic.draft_key"),
-    };
-
-    if (post.get("post_number") === 1) {
-      composerOpts.topic = post.get("topic");
-    } else {
-      composerOpts.post = post;
-    }
-
-    composerOpts.quote = buildQuote(post, buffer, opts);
-    this.quoteState.clear();
-    await this.composer.open(composerOpts);
-  };
-
-  buildQuoteMarkdown = async () => {
-    const { postId } = this.quoteState;
-    const postStream = this.postStream;
-    const { markdown: buffer, opts } = await this.quoteState.markdown();
-    const loadedPost = postStream.findLoadedPost(postId);
-    const post = loadedPost ? loadedPost : await postStream.loadPost(postId);
-    return buildQuote(post, buffer, opts);
-  };
-
-  deletePost = async (post) => {
-    if (!(post = this.guardPost(post, "deletePost"))) {
-      return;
-    }
-    if (post.post_number === 1) {
-      return this.openFull();
-    }
-    if (!post.can_delete) {
-      return;
-    }
-    this.dialog.yesNoConfirm({
-      message: i18n("post.confirm_delete"),
-      didConfirm: async () => {
-        try {
-          await post.destroy(this.currentUser);
-        } catch (e) {
-          popupAjaxError(e);
-          post.undoDeleteState();
-        }
-      },
-    });
-  };
-
-  recoverPost = (post) => {
-    if (!(post = this.guardPost(post, "recoverPost"))) {
-      return;
-    }
-    if (post.post_number === 1) {
-      return this.openFull();
-    }
-    return post.recover();
-  };
-
-  permanentlyDeletePost = async (post) => {
-    if (!(post = this.guardPost(post, "permanentlyDeletePost"))) {
-      return;
-    }
-    let result;
-    try {
-      result = await ajax(`/posts/${post.id}/permanently_delete_check.json`);
-    } catch (e) {
-      return popupAjaxError(e);
-    }
-    if (!result.can_permanently_delete) {
-      return this.dialog.alert(result.reason);
-    }
-    this.showSubModal(PermanentlyDeleteConfirmModal, {
-      message: i18n("post.controls.permanently_delete_post_confirmation"),
-      confirmPhrase: i18n("post.controls.permanently_delete_confirm_phrase"),
-      didConfirm: async () => {
-        try {
-          await post.destroy(this.currentUser, { force_destroy: true });
-        } catch (e) {
-          popupAjaxError(e);
-        }
-      },
-    });
-  };
-
-  lockPost = (post) => {
-    if (!(post = this.guardPost(post, "lockPost"))) {
-      return;
-    }
-    return post.updatePostField("locked", true);
-  };
-
-  unlockPost = (post) => {
-    if (!(post = this.guardPost(post, "unlockPost"))) {
-      return;
-    }
-    return post.updatePostField("locked", false);
-  };
-
-  toggleWiki = (post) => {
-    if (!(post = this.guardPost(post, "toggleWiki"))) {
-      return;
-    }
-    return post.updatePostField("wiki", !post.wiki);
-  };
-
-  togglePostType = (post) => {
-    if (!(post = this.guardPost(post, "togglePostType"))) {
-      return;
-    }
-    const regular = this.site.post_types.regular;
-    const moderator = this.site.post_types.moderator_action;
-    return post.updatePostField(
-      "post_type",
-      post.post_type === moderator ? regular : moderator
-    );
-  };
-
-  rebakePost = (post) => {
-    if (!(post = this.guardPost(post, "rebakePost"))) {
-      return;
-    }
-    return post.rebake();
-  };
-
-  unhidePost = (post) => {
-    if (!(post = this.guardPost(post, "unhidePost"))) {
-      return;
-    }
-    return post.unhide();
-  };
-
-  expandHidden = (post) => {
-    if (!(post = this.guardPost(post, "expandHidden"))) {
-      return;
-    }
-    return post.expandHidden();
-  };
-
-  changeNotice = async (post) => {
-    if (!(post = this.guardPost(post, "changeNotice"))) {
-      return;
-    }
-    await this.showSubModal(ChangePostNoticeModal, { post });
-  };
-
-  changePostOwner = (post) => {
-    if (!(post = this.guardPost(post, "changePostOwner"))) {
-      return;
-    }
-    this.showSubModal(ChangeOwnerModal, {
-      selectedPostsCount: 1,
-      selectedPostIds: [post.id],
-      selectedPostsUsername: post.username,
-      multiSelect: false,
-      deselectAll: () => {},
-      toggleMultiSelect: () => {},
-      topic: post.topic ?? this.topicModel,
-    });
-  };
-
-  grantBadge = (post) => {
-    if (!(post = this.guardPost(post, "grantBadge"))) {
-      return;
-    }
-    this.showSubModal(GrantBadgeModal, { selectedPost: post });
-  };
-
-  showFlags = (post) => {
-    if (!(post = this.guardPost(post, "showFlags"))) {
-      return;
-    }
-    this.showSubModal(this.currentUser ? FlagModal : AnonymousFlagModal, {
-      flagTarget: new PostFlag(),
-      flagModel: post,
-      setHidden: () => post.set("hidden", true),
-    });
-  };
-
-  showHistory = (post, revision) => {
-    if (!(post = this.guardPost(post, "showHistory"))) {
-      return;
-    }
-    this.showSubModal(HistoryModal, {
-      postId: post.id,
-      postVersion: revision || "latest",
-      post,
-      editPost: (p) => this.editPost(p),
-    });
-  };
-
-  showRawEmail = (post) => {
-    if (!(post = this.guardPost(post, "showRawEmail"))) {
-      return;
-    }
-    this.showSubModal(RawEmailModal, post);
-  };
-
-  showLogin = () => {
-    this.closeModal();
-    DiscourseURL.redirectTo("/login");
-  };
-
-  showPagePublish = () => this.openFull();
-  showInvite = () => this.openFull();
-  removeAllowedGroup = () => this.openFull();
-  removeAllowedUser = () => this.openFull();
-  selectBelow = () => this.openFull();
-  selectReplies = (post) => this.openFull();
-  cancelFilter = () => {};
-
-  // Keep the shape expected by post-voting connectors.
-  get topicPageQueryParams() {
-    return {
-      filter: this.postVotingFilter,
-      username_filters: null,
-      replies_to_post_number: null,
-      sort: null,
-      context: null,
-      collapseReplies: null,
-    };
-  }
-
-  // Sync after post-voting changes the stream filter.
-  updateTopicPageQueryParams = () => {
-    this.postVotingFilter = this.topicModel?.postStream?.filter ?? null;
-  };
+  // TopicPreviewServicePatches intercepts same-topic navigation and calls
+  // this directly - keep it as a stable method on the component itself.
+  jumpToPost = (postNumber) => this.progressNav.jumpToPost(postNumber);
 
   openFull = () => {
     const slug = this.topicModel?.slug || this.topic.slug;
@@ -1552,6 +572,23 @@ export default class TopicPreviewModal extends Component {
     });
   };
 
+  // Sync after post-voting changes the stream filter.
+  updateTopicPageQueryParams = () => {
+    this.postVotingFilter = this.topicModel?.postStream?.filter ?? null;
+  };
+
+  // Keep the shape expected by post-voting connectors.
+  get topicPageQueryParams() {
+    return {
+      filter: this.postVotingFilter,
+      username_filters: null,
+      replies_to_post_number: null,
+      sort: null,
+      context: null,
+      collapseReplies: null,
+    };
+  }
+
   lazyImages = lazyImagesModifier;
 
   observePost = createPostVisibilityModifier({
@@ -1586,19 +623,19 @@ export default class TopicPreviewModal extends Component {
       @title={{replaceEmoji (htmlSafe this.title)}}
       @dismissable={{this.dismissable}}
       @autofocus={{false}}
-      @hidden={{this.composerOpen}}
+      @hidden={{this.composerInteractions.composerOpen}}
       class="topic-preview-modal"
       {{this.swipeUpDismiss}}
     >
       <:body>
-        {{#if this.showBackGestureHint}}
+        {{#if this.backGestureHint.show}}
           <div
             class={{concat
               "topic-preview-modal__back-gesture-hint"
-              (if this.hintFading " topic-preview-modal__back-gesture-hint--fading" "")
+              (if this.backGestureHint.fading " topic-preview-modal__back-gesture-hint--fading" "")
             }}
             role="status"
-            {{on "animationend" this.handleHintAnimationEnd}}
+            {{on "animationend" this.backGestureHint.handleAnimationEnd}}
           >
             {{htmlSafe (i18n (themePrefix "topic_preview.back_gesture_hint"))}}
           </div>
@@ -1657,35 +694,35 @@ export default class TopicPreviewModal extends Component {
                 >
                   <Nested
                     @topic={{this.topicModel}}
-                    @opPost={{this.nestedOpPost}}
-                    @rootNodes={{this.nestedRootNodes}}
-                    @sort={{this.nestedSort}}
-                    @effectiveSort={{this.nestedEffectiveSort}}
-                    @hasMoreRoots={{this.nestedHasMoreRoots}}
-                    @loadingMore={{this.nestedLoadingMore}}
-                    @pinnedPostIds={{this.nestedPinnedPostIds}}
-                    @loadMoreRoots={{this.loadMoreNestedRoots}}
-                    @changeSort={{this.changeNestedSort}}
-                    @replyToPost={{this.replyToPost}}
-                    @editPost={{this.editPost}}
-                    @deletePost={{this.deletePost}}
-                    @recoverPost={{this.recoverPost}}
-                    @showFlags={{this.showFlags}}
-                    @showHistory={{this.showHistory}}
-                    @changeNotice={{this.changeNotice}}
-                    @changePostOwner={{this.changePostOwner}}
-                    @grantBadge={{this.grantBadge}}
-                    @lockPost={{this.lockPost}}
-                    @unlockPost={{this.unlockPost}}
-                    @permanentlyDeletePost={{this.permanentlyDeletePost}}
-                    @rebakePost={{this.rebakePost}}
-                    @showPagePublish={{this.showPagePublish}}
-                    @togglePostType={{this.togglePostType}}
-                    @toggleWiki={{this.toggleWiki}}
-                    @unhidePost={{this.unhidePost}}
-                    @fetchedChildrenCache={{this.nestedFetchedChildrenCache}}
-                    @selectReplies={{this.selectReplies}}
-                    @selectBelow={{this.selectBelow}}
+                    @opPost={{this.nested.opPost}}
+                    @rootNodes={{this.nested.rootNodes}}
+                    @sort={{this.nested.sort}}
+                    @effectiveSort={{this.nested.effectiveSort}}
+                    @hasMoreRoots={{this.nested.hasMoreRoots}}
+                    @loadingMore={{this.nested.loadingMore}}
+                    @pinnedPostIds={{this.nested.pinnedPostIds}}
+                    @loadMoreRoots={{this.nested.loadMoreRoots}}
+                    @changeSort={{this.nested.changeSort}}
+                    @replyToPost={{this.composerInteractions.replyToPost}}
+                    @editPost={{this.composerInteractions.editPost}}
+                    @deletePost={{this.postActions.deletePost}}
+                    @recoverPost={{this.postActions.recoverPost}}
+                    @showFlags={{this.postActions.showFlags}}
+                    @showHistory={{this.postActions.showHistory}}
+                    @changeNotice={{this.postActions.changeNotice}}
+                    @changePostOwner={{this.postActions.changePostOwner}}
+                    @grantBadge={{this.postActions.grantBadge}}
+                    @lockPost={{this.postActions.lockPost}}
+                    @unlockPost={{this.postActions.unlockPost}}
+                    @permanentlyDeletePost={{this.postActions.permanentlyDeletePost}}
+                    @rebakePost={{this.postActions.rebakePost}}
+                    @showPagePublish={{this.postActions.showPagePublish}}
+                    @togglePostType={{this.postActions.togglePostType}}
+                    @toggleWiki={{this.postActions.toggleWiki}}
+                    @unhidePost={{this.postActions.unhidePost}}
+                    @fetchedChildrenCache={{this.nested.fetchedChildrenCache}}
+                    @selectReplies={{this.postActions.selectReplies}}
+                    @selectBelow={{this.postActions.selectBelow}}
                     @contextMode={{false}}
                   />
                 </div>
@@ -1696,7 +733,7 @@ export default class TopicPreviewModal extends Component {
                     data-post-number={{tuple.post.post_number}}
                     {{this.observePost}}
                     {{this.lazyImages}}
-                    {{this.progressTracker}}
+                    {{this.progressNav.progressTracker}}
                   >
                     {{#let
                       (if tuple.post.isSmallAction PostSmallAction Post)
@@ -1708,34 +745,34 @@ export default class TopicPreviewModal extends Component {
                         @prevPost={{tuple.prevPost}}
                         @nextPost={{tuple.nextPost}}
                         @canCreatePost={{this.canCreatePost}}
-                        @changeNotice={{fn this.changeNotice tuple.post}}
-                        @changePostOwner={{fn this.changePostOwner tuple.post}}
-                        @deletePost={{fn this.deletePost tuple.post}}
-                        @editPost={{fn this.editPost tuple.post}}
-                        @expandHidden={{fn this.expandHidden tuple.post}}
+                        @changeNotice={{fn this.postActions.changeNotice tuple.post}}
+                        @changePostOwner={{fn this.postActions.changePostOwner tuple.post}}
+                        @deletePost={{fn this.postActions.deletePost tuple.post}}
+                        @editPost={{fn this.composerInteractions.editPost tuple.post}}
+                        @expandHidden={{fn this.postActions.expandHidden tuple.post}}
                         @filteringRepliesToPostNumber={{null}}
-                        @grantBadge={{fn this.grantBadge tuple.post}}
-                        @lockPost={{fn this.lockPost tuple.post}}
-                        @permanentlyDeletePost={{fn this.permanentlyDeletePost tuple.post}}
-                        @rebakePost={{fn this.rebakePost tuple.post}}
-                        @recoverPost={{fn this.recoverPost tuple.post}}
-                        @removeAllowedGroup={{this.removeAllowedGroup}}
-                        @removeAllowedUser={{this.removeAllowedUser}}
-                        @replyToPost={{fn this.replyToPost tuple.post}}
-                        @selectBelow={{fn this.selectBelow tuple.post}}
-                        @selectReplies={{fn this.selectReplies tuple.post}}
-                        @showFlags={{fn this.showFlags tuple.post}}
-                        @showHistory={{fn this.showHistory tuple.post}}
-                        @showInvite={{this.showInvite}}
-                        @showLogin={{this.showLogin}}
-                        @showPagePublish={{this.showPagePublish}}
-                        @showRawEmail={{fn this.showRawEmail tuple.post}}
+                        @grantBadge={{fn this.postActions.grantBadge tuple.post}}
+                        @lockPost={{fn this.postActions.lockPost tuple.post}}
+                        @permanentlyDeletePost={{fn this.postActions.permanentlyDeletePost tuple.post}}
+                        @rebakePost={{fn this.postActions.rebakePost tuple.post}}
+                        @recoverPost={{fn this.postActions.recoverPost tuple.post}}
+                        @removeAllowedGroup={{this.postActions.removeAllowedGroup}}
+                        @removeAllowedUser={{this.postActions.removeAllowedUser}}
+                        @replyToPost={{fn this.composerInteractions.replyToPost tuple.post}}
+                        @selectBelow={{fn this.postActions.selectBelow tuple.post}}
+                        @selectReplies={{fn this.postActions.selectReplies tuple.post}}
+                        @showFlags={{fn this.postActions.showFlags tuple.post}}
+                        @showHistory={{fn this.postActions.showHistory tuple.post}}
+                        @showInvite={{this.postActions.showInvite}}
+                        @showLogin={{this.postActions.showLogin}}
+                        @showPagePublish={{this.postActions.showPagePublish}}
+                        @showRawEmail={{fn this.postActions.showRawEmail tuple.post}}
                         @showReadIndicator={{false}}
-                        @togglePostType={{fn this.togglePostType tuple.post}}
-                        @toggleWiki={{fn this.toggleWiki tuple.post}}
-                        @unhidePost={{fn this.unhidePost tuple.post}}
-                        @unlockPost={{fn this.unlockPost tuple.post}}
-                        @cancelFilter={{this.cancelFilter}}
+                        @togglePostType={{fn this.postActions.togglePostType tuple.post}}
+                        @toggleWiki={{fn this.postActions.toggleWiki tuple.post}}
+                        @unhidePost={{fn this.postActions.unhidePost tuple.post}}
+                        @unlockPost={{fn this.postActions.unlockPost tuple.post}}
+                        @cancelFilter={{this.postActions.cancelFilter}}
                         @topicPageQueryParams={{this.topicPageQueryParams}}
                         @updateTopicPageQueryParams={{this.updateTopicPageQueryParams}}
                         @streamElement={{true}}
@@ -1773,27 +810,27 @@ export default class TopicPreviewModal extends Component {
           {{/if}}
         {{/unless}}
 
-        {{#unless this.hideProgress}}
+        {{#unless this.progressNav.hideProgress}}
           <TopicPreviewModalProgressBar
-            @position={{this.progressPosition}}
-            @total={{this.progressTotal}}
-            @percent={{this.progressPercent}}
-            @showBackButton={{this.showProgressBackButton}}
-            @onBack={{this.goToLastRead}}
-            @onJumpStart={{this.jumpToStart}}
-            @onJumpEnd={{this.jumpToEnd}}
-            @onOpen={{this.openScrubber}}
+            @position={{this.progressNav.progressPosition}}
+            @total={{this.progressNav.progressTotal}}
+            @percent={{this.progressNav.progressPercent}}
+            @showBackButton={{this.progressNav.showProgressBackButton}}
+            @onBack={{this.progressNav.goToLastRead}}
+            @onJumpStart={{this.progressNav.jumpToStart}}
+            @onJumpEnd={{this.progressNav.jumpToEnd}}
+            @onOpen={{this.progressNav.openScrubber}}
           />
         {{/unless}}
 
-        {{#if this.scrubberOpen}}
+        {{#if this.progressNav.scrubberOpen}}
           <TopicPreviewModalProgressScrubberOverlay
             @topicModel={{this.topicModel}}
-            @enteredIndex={{this.scrubberEnteredIndex}}
-            @onJumpToIndex={{this.jumpToIndex}}
-            @onJumpToStart={{this.jumpToStart}}
-            @onJumpToEnd={{this.jumpToEnd}}
-            @onClose={{this.closeScrubber}}
+            @enteredIndex={{this.progressNav.scrubberEnteredIndex}}
+            @onJumpToIndex={{this.progressNav.jumpToIndex}}
+            @onJumpToStart={{this.progressNav.jumpToStart}}
+            @onJumpToEnd={{this.progressNav.jumpToEnd}}
+            @onClose={{this.progressNav.closeScrubber}}
           />
         {{/if}}
 
@@ -1803,7 +840,7 @@ export default class TopicPreviewModal extends Component {
               class="btn-primary"
               @icon="reply"
               @translatedLabel={{i18n "js.composer.reply"}}
-              @action={{this.replyToTopic}}
+              @action={{this.composerInteractions.replyToTopic}}
             />
           {{/if}}
           <DButton
@@ -1819,10 +856,10 @@ export default class TopicPreviewModal extends Component {
     {{#if this.topicModel}}
       <PostTextSelection
         @topic={{this.topicModel}}
-        @quoteState={{this.quoteState}}
-        @editPost={{this.editPost}}
-        @selectText={{this.selectText}}
-        @buildQuoteMarkdown={{this.buildQuoteMarkdown}}
+        @quoteState={{this.composerInteractions.quoteState}}
+        @editPost={{this.composerInteractions.editPost}}
+        @selectText={{this.composerInteractions.selectText}}
+        @buildQuoteMarkdown={{this.composerInteractions.buildQuoteMarkdown}}
       />
     {{/if}}
 

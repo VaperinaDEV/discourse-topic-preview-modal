@@ -12,8 +12,8 @@ import {
   discardPrefetch,
   promotePrefetch,
   trackTopicVisit,
-} from "../lib/topic-preview-modal/prefetch";
-import { triggerHaptic } from "../lib/topic-preview-modal/haptic";
+} from "../lib/prefetch";
+import { triggerHaptic } from "../lib/haptic";
 
 // Explicit trigger icon (settings.trigger_style === "button").
 // Unlike click.gjs this does not overlay the row — title link and other
