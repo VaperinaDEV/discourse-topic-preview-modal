@@ -11,8 +11,8 @@ import {
   discardPrefetch,
   promotePrefetch,
   trackTopicVisit,
-} from "../lib/topic-preview-modal/prefetch";
-import { triggerHaptic } from "../lib/topic-preview-modal/haptic";
+} from "../lib/prefetch";
+import { triggerHaptic } from "../lib/haptic";
 
 export default class TopicListItemClick extends Component {
   @service modal;

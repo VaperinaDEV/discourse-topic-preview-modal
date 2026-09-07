@@ -1,5 +1,5 @@
 import { modifier } from "ember-modifier";
-import TopicPreviewSwipeUpDismiss from "../../lib/topic-preview-modal/swipe-up-dismiss";
+import TopicPreviewSwipeUpDismiss from "../lib/swipe-up-dismiss";
 
 // Finds DModal's own `.d-modal__container` (see rootSelector - same
 // document.querySelector-after-render pattern already used by

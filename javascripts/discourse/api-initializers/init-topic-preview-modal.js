@@ -1,7 +1,7 @@
 import { apiInitializer } from "discourse/lib/api";
 import TopicListItemClick from "../components/click";
 import TopicPreviewButtonTrigger from "../components/button-trigger";
-import { installGlobalTopicLinkInterceptor } from "../lib/topic-preview-modal/global-link-interceptor";
+import { installGlobalTopicLinkInterceptor } from "../lib/global-link-interceptor";
 
 export default apiInitializer((api) => {
   const capabilities = api.container.lookup("capabilities:main");

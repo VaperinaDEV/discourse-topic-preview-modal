@@ -1,4 +1,4 @@
-import TopicPreviewModal from "../../components/modal/topic-preview-modal";
+import TopicPreviewModal from "../components/modal/topic-preview-modal";
 import { trackTopicVisit } from "./prefetch";
 import { matchTopicLink } from "./topic-link";
 import { triggerHaptic } from "./haptic";
