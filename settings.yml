@@ -17,6 +17,10 @@ plugin_outlet:
 open_all_topic_links:
   default: false
   type: bool
+excluded_categories:
+  default: ""
+  type: list
+  list_type: category
 modal_max_width:
   default: 600
   type: integer

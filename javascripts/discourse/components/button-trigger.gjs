@@ -14,6 +14,7 @@ import {
   trackTopicVisit,
 } from "../lib/prefetch";
 import { triggerHaptic } from "../lib/haptic";
+import { isCategoryExcluded } from "../lib/excluded-categories";
 
 // Explicit trigger icon (settings.trigger_style === "button").
 // Unlike click.gjs this does not overlay the row — title link and other
@@ -29,11 +30,16 @@ export default class TopicPreviewButtonTrigger extends Component {
     return this.args.outletArgs.topic;
   }
 
+  // Excluded category - no trigger, topic opens via normal navigation only.
+  get isExcluded() {
+    return isCategoryExcluded(this.topic?.category_id);
+  }
+
   // Visibility-driven prefetch (debounced upstream in schedulePrefetch).
   setupVisibilityPrefetch = modifier((element) => {
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry.isIntersecting) {
+        if (entry.isIntersecting && !this.isExcluded) {
           schedulePrefetch(this.topic);
         } else {
           discardPrefetch(this.topic?.id);
@@ -79,6 +85,7 @@ export default class TopicPreviewButtonTrigger extends Component {
   }
 
   <template>
+    {{#unless this.isExcluded}}
     <div
       class="topic-preview-modal__trigger-wrapper"
       {{this.setupVisibilityPrefetch}}
@@ -101,5 +108,6 @@ export default class TopicPreviewButtonTrigger extends Component {
         </span>
       {{/if}}
     </div>
+    {{/unless}}
   </template>
 }

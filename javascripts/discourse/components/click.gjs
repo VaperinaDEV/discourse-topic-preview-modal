@@ -13,6 +13,7 @@ import {
   trackTopicVisit,
 } from "../lib/prefetch";
 import { triggerHaptic } from "../lib/haptic";
+import { isCategoryExcluded } from "../lib/excluded-categories";
 
 export default class TopicListItemClick extends Component {
   @service modal;
@@ -39,6 +40,12 @@ export default class TopicListItemClick extends Component {
     }
 
     const topic = this.args.outletArgs.topic;
+
+    // Excluded category - do nothing and let the row's own title link
+    // navigate normally, no modal.
+    if (isCategoryExcluded(topic?.category_id)) {
+      return;
+    }
 
     event.preventDefault();
     event.stopPropagation();
@@ -73,7 +80,11 @@ export default class TopicListItemClick extends Component {
   @action
   queueTopicPrefetch() {
     const topic = this.topic;
-    if (!topic?.id || this.prefetchedTopicIds.has(topic.id)) {
+    if (
+      !topic?.id ||
+      this.prefetchedTopicIds.has(topic.id) ||
+      isCategoryExcluded(topic.category_id)
+    ) {
       return;
     }
     this.prefetchedTopicIds.add(topic.id);

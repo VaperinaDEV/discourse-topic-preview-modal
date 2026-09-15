@@ -23,6 +23,10 @@ en:
         away - not just topic-list rows. A link to a specific post opens the
         modal scrolled to that post. Links inside the topic list and inside
         an already-open preview modal keep their existing behavior.
+      excluded_categories: >-
+        Topics in these categories always use Discourse's normal full-page
+        navigation and never open in the preview modal - on /latest, other
+        topic lists, and any link covered by open_all_topic_links.
       modal_max_width: >-
         Maximum width (in pixels) of the preview modal from the sm (mobile)
         viewport breakpoint upward. Below that breakpoint the modal falls

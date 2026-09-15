@@ -2,6 +2,7 @@ import TopicPreviewModal from "../components/modal/topic-preview-modal";
 import { trackTopicVisit } from "./prefetch";
 import { matchTopicLink } from "./topic-link";
 import { triggerHaptic } from "./haptic";
+import { findKnownCategoryId, isCategoryExcluded } from "./excluded-categories";
 
 // Installs a single, capture-phase document click listener that opens the
 // preview modal for ANY link pointing to a topic, anywhere on the page —
@@ -84,6 +85,13 @@ function handleClick(event, api) {
   // click-track handle the in-page jump instead of layering a modal on top.
   const currentMatch = matchTopicLink(window.location.pathname);
   if (currentMatch && currentMatch.topicId === match.topicId) {
+    return;
+  }
+
+  // Excluded category - only intercept if we can confirm it's NOT excluded;
+  // an unknown category (topic not yet loaded anywhere) keeps existing
+  // behavior and opens the modal.
+  if (isCategoryExcluded(findKnownCategoryId(api, match.topicId))) {
     return;
   }
 
