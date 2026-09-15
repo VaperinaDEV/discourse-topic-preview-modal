@@ -1,4 +1,5 @@
 import { tracked } from "@glimmer/tracking";
+import { next } from "@ember/runloop";
 import { ajax } from "discourse/lib/ajax";
 import { popupAjaxError } from "discourse/lib/ajax-error";
 import { processNestedRootResponse } from "discourse/lib/nested-topic-model";
@@ -250,6 +251,14 @@ export default class NestedTopicController {
     const data = await ajax(
       `/n/${slug || "-"}/${topicId}.json?${params.toString()}`
     );
+
+    if (component.isDestroying || component.isDestroyed) {
+      return;
+    }
+
+    // Defer to the next runloop tick to avoid updating an existing live record
+    // during an active render, which can trigger Ember's backtracking-render guard.
+    await new Promise((resolve) => next(resolve));
 
     if (component.isDestroying || component.isDestroyed) {
       return;
