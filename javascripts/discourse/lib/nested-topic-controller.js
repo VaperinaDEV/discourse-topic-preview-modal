@@ -7,13 +7,6 @@ import processNode, {
 } from "discourse/lib/process-node";
 import Bookmark from "discourse/models/bookmark";
 
-// Owns the nested/threaded-view post tree and keeps it in sync with
-// MessageBus and nested-replies appEvents. `component` must expose:
-// topic, topicId, topicModel (get/set), topicController, router, site,
-// siteSettings, store, appEvents, currentUser, timingTracker,
-// isDestroying, isDestroyed, resolvedTitle (set), resolvedAcceptedAnswer
-// (set), canCreatePost (set), initialPositioning (set), showExtraWidgets
-// (set).
 export default class NestedTopicController {
   #component;
 
@@ -25,8 +18,8 @@ export default class NestedTopicController {
   @tracked page = 0;
   @tracked loadingMore = false;
   @tracked pinnedPostIds = [];
+
   fetchedChildrenCache = new Map();
-  // post_number -> Post for MessageBus updates at any tree depth.
   postRegistry = new Map();
 
   constructor(component) {
@@ -67,6 +60,20 @@ export default class NestedTopicController {
     return null;
   }
 
+  // Updates the local read state used by the nested post indicators.
+  readPosts(postNumbers) {
+    for (const postNumber of postNumbers) {
+      const post = this.postRegistry.get(postNumber);
+      if (post && !post.read) {
+        if (typeof post.set === "function") {
+          post.set("read", true);
+        } else {
+          post.read = true;
+        }
+      }
+    }
+  }
+
   belongsToTopic(postData) {
     const component = this.#component;
     return (
@@ -101,6 +108,7 @@ export default class NestedTopicController {
     const component = this.#component;
     const topicId = component.topicId;
     let postData;
+
     try {
       postData = await ajax(`/posts/${data.id}.json`);
     } catch {
@@ -122,6 +130,7 @@ export default class NestedTopicController {
       ...postData,
       children: [],
     });
+
     const replyTo = postData.reply_to_post_number;
     const isRoot = !replyTo || replyTo === 1;
 
@@ -140,6 +149,7 @@ export default class NestedTopicController {
     const component = this.#component;
     const topicId = component.topicId;
     let postData;
+
     try {
       postData = await ajax(`/posts/${data.id}.json`);
     } catch {
@@ -162,6 +172,7 @@ export default class NestedTopicController {
 
     const updated = component.store.createRecord("post", postData);
     existing.updateFromPost(updated);
+
     if (!postData.deleted_at) {
       existing.set("deleted_post_placeholder", false);
     }
@@ -172,8 +183,10 @@ export default class NestedTopicController {
     if (!post) {
       return;
     }
+
     post.set("deleted_at", new Date());
     post.set("deleted_post_placeholder", true);
+
     if (!this.#component.currentUser?.staff) {
       post.set("cooked", "");
     }
@@ -181,6 +194,7 @@ export default class NestedTopicController {
 
   handlePostRegistered = (post) => {
     const topicId = this.#component.topicId;
+
     if (
       post?.post_number != null &&
       topicId != null &&
@@ -249,8 +263,7 @@ export default class NestedTopicController {
       store: component.store,
     });
 
-    // Pagination returns bare roots without topic metadata. Only replace
-    // topicModel when the result has an id/slug, or deeper fetches break.
+    // Pagination responses may omit topic metadata.
     if (page === 0 || result.topic?.id != null) {
       component.topicModel = result.topic;
       this.repairTopicRecord(component.topicModel);
@@ -271,12 +284,14 @@ export default class NestedTopicController {
     if (this.opPost?.post_number != null) {
       this.postRegistry.set(this.opPost.post_number, this.opPost);
     }
+
     if (this.opPost && component.topicModel?.postStream) {
       registerPostInTopicPostStream(component.topicModel, this.opPost);
     }
 
     this.rootNodes =
       page === 0 ? result.rootNodes : [...this.rootNodes, ...result.rootNodes];
+
     this.page = result.page;
     this.hasMoreRoots = result.hasMoreRoots;
     this.sort = result.sort;
@@ -291,6 +306,7 @@ export default class NestedTopicController {
 
     const component = this.#component;
     this.loadingMore = true;
+
     try {
       await this.loadRoots({ page: this.page + 1, sort: this.sort });
     } finally {
@@ -306,6 +322,7 @@ export default class NestedTopicController {
     }
 
     const component = this.#component;
+
     try {
       this.loadingMore = true;
       this.fetchedChildrenCache.clear();
@@ -325,14 +342,18 @@ export default class NestedTopicController {
     await this.loadRoots({ page: 0 });
 
     const component = this.#component;
+
     if (component.isDestroying || component.isDestroyed) {
       return;
     }
 
     component.resolvedTitle =
       component.topicModel?.fancy_title ?? component.topicModel?.title ?? null;
-    component.resolvedAcceptedAnswer = !!component.topicModel?.accepted_answer;
-    component.canCreatePost = !!component.topicModel?.details?.can_create_post;
+    component.resolvedAcceptedAnswer =
+      !!component.topicModel?.accepted_answer;
+    component.canCreatePost =
+      !!component.topicModel?.details?.can_create_post;
+
     component.timingTracker.trackView();
     component.initialPositioning = false;
     component.showExtraWidgets = true;
