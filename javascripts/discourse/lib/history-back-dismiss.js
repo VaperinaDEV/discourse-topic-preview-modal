@@ -1,12 +1,8 @@
-// Handles native mobile Back as modal dismissal.
-// Uses a same-URL history entry so Back closes the modal without
-// navigating away from the underlying page.
-//
-// Ember's router also reacts to the resulting popstate, so same-route
-// transitions are aborted to prevent the progress bar and scroll reset.
-//
-// When the modal closes another way, the history entry is cleaned up
-// without affecting the real navigation history.
+// Handles native mobile Back as modal dismissal, via a same-URL history entry
+// so Back closes the modal without navigating away. Ember's router also
+// reacts to the resulting popstate, so same-route transitions are aborted to
+// avoid a progress-bar/scroll reset. If the modal closes another way, the
+// history entry is cleaned up without touching real navigation history.
 export default class TopicPreviewHistoryBackDismiss {
   #onDismiss;
   #router;

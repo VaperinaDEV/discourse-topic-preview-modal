@@ -20,6 +20,8 @@ export default class NestedTopicController {
   @tracked pinnedPostIds = [];
 
   fetchedChildrenCache = new Map();
+  // Without this, every re-render resets each post's expanded/collapsed state.
+  expansionState = new Map();
   postRegistry = new Map();
 
   constructor(component) {
@@ -268,12 +270,7 @@ export default class NestedTopicController {
       component.topicModel = result.topic;
       this.repairTopicRecord(component.topicModel);
 
-      if (
-        component.topicController &&
-        !component.router.currentRouteName.startsWith("topic.")
-      ) {
-        component.topicController.set("model", component.topicModel);
-      }
+      component.adoptTopicController();
     }
 
     if (page === 0) {
@@ -326,6 +323,7 @@ export default class NestedTopicController {
     try {
       this.loadingMore = true;
       this.fetchedChildrenCache.clear();
+      this.expansionState.clear();
       await this.loadRoots({ page: 0, sort });
     } catch (e) {
       if (!component.isDestroying && !component.isDestroyed) {

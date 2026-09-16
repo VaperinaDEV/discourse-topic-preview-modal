@@ -1,22 +1,11 @@
 import { modifier } from "ember-modifier";
 
 // Container-level counterpart to create-post-visibility-modifier.js +
-// lazy-images.js, for the <Nested> tree.
-//
-// The flat view attaches those two modifiers to each post's own wrapper
-// element, one per `{{#each this.postTuples}}` iteration. <Nested> renders
-// its own internal DOM (NestedOp/NestedPost/NestedPostChildren) that this
-// component doesn't template - there's no per-post element to attach a
-// modifier to directly. Instead we attach ONE modifier to the container
-// <Nested> renders into, and use a MutationObserver to discover
-// `[data-post-number]` elements as they appear - root posts on first paint,
-// then lazily-loaded children, "load more replies", newly-expanded
-// branches, and posts revealed after a sort change all arrive after the
-// fact and need to be picked up the same way.
-//
-// Folds together what the flat view does with two separate modifiers
-// (read-time visibility tracking + marking <img> lazy/async) since both
-// need the same "find post elements as they appear" machinery here.
+// lazy-images.js, for the <Nested> tree, which doesn't template a per-post
+// wrapper we could attach those to individually. Instead this attaches once
+// to <Nested>'s container and uses a MutationObserver to pick up
+// `[data-post-number]` elements as they appear — root posts, lazily-loaded
+// children, "load more", newly-expanded branches, sort changes, etc.
 export default function createNestedPostTrackerModifier({
   rootSelector,
   onVisible,
@@ -55,10 +44,8 @@ export default function createNestedPostTrackerModifier({
     markImagesLazy(element);
     intersectionObserver.observe(element);
 
-    // Same synchronous-fallback reasoning as create-post-visibility-modifier:
-    // don't rely solely on IntersectionObserver's async first callback for
-    // an element that's already on-screen the moment it's discovered (e.g.
-    // a short nested topic that never scrolls).
+    // Don't rely solely on IntersectionObserver's async first callback for
+    // an element that's already on-screen the moment it's discovered.
     if (isAlreadyVisible(element, root)) {
       const n = parseInt(element.dataset.postNumber, 10);
       if (n) {

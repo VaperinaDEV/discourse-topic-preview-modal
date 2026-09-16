@@ -1,16 +1,11 @@
 import { modifier } from "ember-modifier";
 import TopicPreviewSwipeUpDismiss from "../lib/swipe-up-dismiss";
 
-// Finds DModal's own `.d-modal__container` (see rootSelector - same
-// document.querySelector-after-render pattern already used by
-// create-post-visibility-modifier.js and create-load-more-sentinel-modifier.js
-// for other internal DModal nodes) and attaches the independent upward-swipe
-// tracker to it directly. `enabled` mirrors core's own dSwipe modifier,
-// which no-ops the same way when its own `enabled` arg is false.
-//
-// Not tied to whichever element this modifier is technically applied to in
-// the template - it only uses that element's insert/destroy timing, and
-// looks up its real target via rootSelector.
+// Finds DModal's own `.d-modal__container` via rootSelector (same
+// after-render lookup pattern as create-post-visibility-modifier.js) and
+// attaches the upward-swipe tracker to it directly — not to whatever element
+// this modifier is applied to in the template, which is only used for
+// insert/destroy timing. `enabled` mirrors core's dSwipe modifier.
 export default function createSwipeUpDismissModifier({
   rootSelector,
   onDismiss,

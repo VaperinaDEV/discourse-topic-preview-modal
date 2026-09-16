@@ -2,33 +2,19 @@ import { getOwner } from "@ember/owner";
 import DiscourseURL from "discourse/lib/url";
 import { matchTopicLink } from "./topic-link";
 
-// Temporarily redirects a few shared services/singletons so that core
-// components (Post, PostBookmarkManager, flag/history/etc. modals) behave
-// correctly while rendered *inside* the topic-preview-modal, then restores
-// them when the modal closes.
-//
-//   - modal.show()      -> routed into the modal's own local sub-modal
-//                           mechanism (component.showSubModal), so opening
-//                           e.g. the flag modal doesn't close the preview.
-//   - modal.close()     -> foreign close calls (e.g. a mobile DMenuInstance)
-//                           are swallowed unless self-initiated by the modal
-//                           itself, or close the active sub-modal instead.
-//   - bookmarkApi.create/update -> re-throw on falsy result, since these
-//                           normally swallow errors via popupAjaxError and
-//                           return undefined, which would otherwise cause a
-//                           secondary error inside PostBookmarkManager.
-//   - DiscourseURL.routeTo -> same-topic links are intercepted and jump
-//                           inside the modal instead of navigating away.
-//   - route:topic#modelFor -> "topic" resolves to our topicModel instead
-//                           of undefined. We render core's topic template
-//                           without ever transitioning the router into the
-//                           "topic" route, so any TopicRoute @action
-//                           calling `this.modelFor("topic")`
-//                           (showFlagTopic, showPagePublish,
-//                           showTopicTimerModal, etc.) would otherwise get
-//                           undefined and crash - confirmed against core
-//                           source, e.g. showFlagTopic passes that model
-//                           straight to FlagModal as `flagModel`.
+// Temporarily redirects shared services/singletons so core components (Post,
+// PostBookmarkManager, flag/history modals) behave correctly while rendered
+// inside the modal, then restores them on close:
+//   modal.show/close    -> routed into the modal's own sub-modal mechanism.
+//   bookmarkApi.create/update -> re-thrown on falsy result (they normally
+//                           swallow errors via popupAjaxError).
+//   DiscourseURL.routeTo -> same-topic links jump inside the modal instead
+//                           of navigating away.
+//   route:topic#modelFor -> resolves "topic" to our topicModel, since we
+//                           render core's topic template without ever
+//                           transitioning into the "topic" route, and
+//                           TopicRoute actions (showFlagTopic etc.) call
+//                           this.modelFor("topic") directly.
 //
 // `component` must expose: modal, bookmarkApi (services), topicModel,
 // selfInitiatedClose, activeSubModal, topicId, showSubModal(),
@@ -106,28 +92,16 @@ export default class TopicPreviewServicePatches {
           return Promise.resolve();
         }
       }
-      // Navigating away to a genuinely different topic. Restoring the
-      // service patches alone isn't enough here - the modal itself must
-      // be fully closed/destroyed *before* the real route transition
-      // runs. Otherwise it stays mounted against the topic that's no
-      // longer shown: its messageBus subscription and timing-tracker
-      // interval (which periodically swaps topicController.model back
-      // and forth, see timing-tracker.js) keep firing against the old
-      // topic, racing with the freshly-entered real topic route's own
-      // presence/screen-track/post-stream setup for the new one. That
-      // race is what produces "PresenceChannel not found", 404s from
-      // /topics/timings, and null errors in currentPostChanged.
+      // Navigating to a different topic: close the modal before the real
+      // transition runs, rather than leaving it mounted (messageBus,
+      // timing-tracker) against a topic that's no longer shown.
       component.restoreServicePatches();
-      // Remove the modal's history marker before the real navigation below.
-      // This must not traverse history; the route transition belongs to the
-      // link the user actually clicked.
       component.historyBackDismiss?.stop();
       component.closeModal();
       return this.#originalRouteTo(path, opts);
     };
 
-    // TopicRoute actions read their model via modelFor("topic"), not
-    // topicController - see class comment above.
+    // TopicRoute actions read their model via modelFor("topic").
     const topicRoute = getOwner(component)?.lookup?.("route:topic");
     if (topicRoute) {
       this.#topicRoute = topicRoute;

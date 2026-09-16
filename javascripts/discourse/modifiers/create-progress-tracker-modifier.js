@@ -1,21 +1,15 @@
 import { modifier } from "ember-modifier";
 
-// How close to the scroll container's max scrollTop still counts as
-// "reached the bottom" - a couple of px of slack for subpixel rounding
-// across browsers/zoom levels.
+// Slack (px) for "reached the bottom" across browsers/zoom rounding.
 const BOTTOM_EPSILON_PX = 4;
 
-// Tracks the post at the active reading position for the progress indicator.
-// Shared across all attached elements, mirroring createPostVisibilityModifier.
-//
-// We use a local tracker instead of core's global `topic:current-post-scrolled`
-// event to prevent the modal's scroll position from affecting the background
-// topic's progress bar.
-//
-// The active post is found with a single-point hit-test at `bandPercent`
-// down the scroll container. Since posts have no gaps, exactly one post can
-// contain that point, avoiding the ambiguous overlap that a broad top-band
-// check can produce after jumps.
+// Tracks the post at the active reading position for the progress indicator,
+// shared across all attached elements. Uses a local tracker instead of
+// core's global `topic:current-post-scrolled` event so the modal's scroll
+// doesn't affect the background topic's progress bar. The active post is
+// found via a single-point hit-test at `bandPercent` down the container —
+// posts have no gaps, so exactly one can contain that point, avoiding the
+// ambiguous overlap a broad top-band check produces after jumps.
 export default function createProgressTrackerModifier({
   rootSelector,
   onCurrentPostChange,
@@ -58,9 +52,8 @@ export default function createProgressTrackerModifier({
     );
   }
 
-  // The single post whose bounding rect actually contains the waterline
-  // point, or null if the waterline currently falls outside every attached
-  // post (e.g. above the first one right after mount).
+  // The post whose bounding rect contains the waterline point, or null if
+  // the waterline falls outside every attached post.
   function postAtWaterline(waterlineY) {
     for (const [postNumber, element] of attached) {
       const rect = element.getBoundingClientRect();
@@ -76,9 +69,8 @@ export default function createProgressTrackerModifier({
       return;
     }
 
-    // Unlike full topic pages, compact modals may lack enough content below the
-    // last post for the waterline to reach it. Use the scroll limit as a fallback:
-    // when no further scrolling is possible, the last post is considered active.
+    // Compact modals may lack content below the last post for the waterline
+    // to reach — fall back to the scroll limit.
     if (isAtBottom()) {
       onCurrentPostChange(maxAttached());
       return;
@@ -93,9 +85,7 @@ export default function createProgressTrackerModifier({
       return;
     }
 
-    // Waterline missed every post - it's above the first one (top of a
-    // short/just-loaded stream) or below the last. Snap to whichever edge
-    // it's nearest.
+    // Waterline missed every post — snap to the nearest edge.
     onCurrentPostChange(waterlineY < bounds.top ? minAttached() : maxAttached());
   }
 

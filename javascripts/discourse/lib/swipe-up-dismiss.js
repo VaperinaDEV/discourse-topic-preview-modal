@@ -6,26 +6,23 @@ import {
 // Tolerance for subpixel rounding when checking if the post list is at the bottom.
 const AT_BOTTOM_EPSILON_PX = 2;
 
-// DModal only supports downward swipe-to-dismiss. This modifier handles
-// upward dismissal when the post list is already at the bottom.
-//
-// Claim upward gestures in the capture phase so DModal does not process
-// the same gesture. Once claimed, the modal follows the finger 1:1 and
-// uses the same thresholds and easing as DModal's downward dismissal.
-//
-// Thresholds and easing mirror DModal's private values and may need updating
-// if core changes them.
+// DModal only supports downward swipe-to-dismiss. This handles upward
+// dismissal when the post list is already at the bottom: claims the gesture
+// in the capture phase so DModal doesn't also process it, then follows the
+// finger 1:1 using the same thresholds/easing as DModal's own dismissal
+// (mirrored here since they're private; may need updating if core changes
+// them).
 const SWIPE_VELOCITY_THRESHOLD = 0.4; // px/ms
 const SWIPE_CLOSE_DISTANCE_RATIO = 0.25; // fraction of container height
 const SWIPE_SETTLE_EASING = "cubic-bezier(0.32, 0.72, 0, 1)";
 
-// Mirrors DModal's dampened overdrag for smoother movement against the gesture direction.
+// Mirrors DModal's dampened overdrag.
 function dampenedOverdrag(distance) {
   return Math.max(0, 8 * (Math.log(distance + 1) - 2));
 }
 
 // Mirrors core's shouldDeferSwipeToContent for this modal's scrollable
-// ancestor, with bottom-edge tolerance. Column-reverse is not needed here.
+// ancestor, with bottom-edge tolerance.
 function hasScrollableRoomBelow(target, container) {
   let element = target;
   while (element && element !== container) {
@@ -48,9 +45,8 @@ export default class TopicPreviewSwipeUpDismiss {
   #backdrop;
   #state = null;
 
-  // onDismiss: called after a confirmed upward dismiss and its animation.
-  // canDismiss: checked before claiming the gesture to respect the modal's
-  // current dismissable state.
+  // onDismiss: called after a confirmed dismiss + animation.
+  // canDismiss: checked before claiming the gesture.
   constructor({ onDismiss, canDismiss }) {
     this.#onDismiss = onDismiss;
     this.#canDismiss = canDismiss;
@@ -127,8 +123,8 @@ export default class TopicPreviewSwipeUpDismiss {
     const deltaY = touch.clientY - state.startY;
 
     if (!state.direction) {
-      // Same 5px settle DModal's own tracker waits out before committing to
-      // a direction, so a light tap-and-lift never counts as a swipe.
+      // Same settle distance DModal waits out before committing to a
+      // direction, so a light tap-and-lift never counts as a swipe.
       if (
         Math.abs(deltaX) < MINIMUM_SWIPE_DISTANCE &&
         Math.abs(deltaY) < MINIMUM_SWIPE_DISTANCE
@@ -159,8 +155,6 @@ export default class TopicPreviewSwipeUpDismiss {
 
       state.claimed = true;
       this.#container.classList.add("topic-preview-modal--swiping-up");
-      
-      // Distance needed to move the modal completely offscreen.
       state.offscreenDistance = this.#container.getBoundingClientRect().bottom;
     }
 
@@ -181,9 +175,8 @@ export default class TopicPreviewSwipeUpDismiss {
     state.lastT = now;
     state.deltaY = deltaY;
 
-    // Applied instantly on every move so the modal tracks the finger 1:1 -
-    // same as DModal's own live handleSwipe, just inverted (and dampening
-    // a downward wobble instead of an upward one).
+    // Tracks the finger 1:1, same as DModal's own live handleSwipe but
+    // inverted, dampening a downward wobble instead of an upward one.
     const position = deltaY <= 0 ? deltaY : dampenedOverdrag(deltaY);
     this.#animateTo(position, 0);
   };
@@ -208,9 +201,8 @@ export default class TopicPreviewSwipeUpDismiss {
       (velocity < SWIPE_VELOCITY_THRESHOLD && distance < closeDistance)
     ) {
       this.#container.classList.remove("topic-preview-modal--swiping-up");
-      // Below threshold (or drifted back down at release) - settle back to
-      // rest ourselves, since DModal never tracked this gesture to have a
-      // snap-back of its own to fall back on.
+      // Below threshold or drifted back down — settle back ourselves, since
+      // DModal never tracked this gesture to snap back on its own.
       this.#animateTo(0, getMaxAnimationTimeMs());
       return;
     }
@@ -235,9 +227,8 @@ export default class TopicPreviewSwipeUpDismiss {
     }
 
     if (this.#backdrop) {
-      // Same formula DModal's own #animateBackdropOpacity uses: fades out
-      // proportionally to distance dragged, clamped so it never exceeds
-      // the backdrop's own resting CSS opacity.
+      // Same formula as DModal's #animateBackdropOpacity: fades proportionally
+      // to drag distance, clamped to the backdrop's resting opacity.
       const opacity = 1 - Math.abs(position) / container.clientHeight;
       this.#backdrop.animate(
         [{ opacity: Math.max(0, Math.min(opacity, 0.6)) }],
@@ -268,13 +259,11 @@ export default class TopicPreviewSwipeUpDismiss {
       backdrop.animate([{ opacity: 0 }], { fill: "forwards", duration });
     }
 
-    // Animate the modal completely offscreen.
+    const dismiss = () => this.#onDismiss();
     const animation = container.animate(
       [{ transform: `translateY(-${offscreenDistance}px)` }],
       { fill: "forwards", duration, easing: SWIPE_SETTLE_EASING }
     );
-
-    const dismiss = () => this.#onDismiss();
     animation.finished.then(dismiss, dismiss);
   }
 }
