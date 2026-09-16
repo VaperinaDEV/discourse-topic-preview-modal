@@ -1,10 +1,8 @@
 import { ajax } from "discourse/lib/ajax";
 import PreloadStore from "discourse/lib/preload-store";
 
-// Shared across every topic-list row on the page: caps concurrent topic
-// prefetch requests so a fast scroll doesn't fire dozens of topic JSON
-// fetches at once. Configurable via the theme's "max_concurrent_prefetches"
-// setting.
+// Caps concurrent topic prefetch requests (max_concurrent_prefetches) so a
+// fast scroll doesn't fire dozens of topic JSON fetches at once.
 
 function createPrefetchQueue(maxConcurrent) {
   const pending = [];
@@ -44,12 +42,10 @@ function createPrefetchQueue(maxConcurrent) {
 
 const prefetchQueue = createPrefetchQueue(settings.max_concurrent_prefetches);
 
-// Rolling-window safety net: once "max_prefetches_per_minute" prefetches
-// have fired in the last 60s, further scroll-triggered prefetches are
-// skipped until the window rolls forward (rows still open fine on click,
-// they just load like a normal modal instead of feeling instant). This
-// guards against a fast-scroll burst without permanently disabling
-// prefetch for the rest of the page session. 0 = unlimited.
+// Rolling-window safety net: once max_prefetches_per_minute is hit, further
+// scroll-triggered prefetches are skipped until the window rolls forward
+// (rows still open fine on click, just without the instant-load feel).
+// 0 = unlimited.
 const PREFETCH_BUDGET_WINDOW_MS = 60 * 1000;
 let prefetchTimestamps = [];
 
@@ -69,16 +65,14 @@ export function buildTopicPreviewUrl(topic) {
     : `/t/${topic.id}.json`;
 }
 
-// Intentionally NOT the core `topic_${id}` key. Writing there would leak our
-// last_read+1-scoped preview JSON into a real topic-route navigation.
-// Private namespace ensures only the preview-modal path can see it.
+// Not the core `topic_${id}` key — that would leak our last_read+1-scoped
+// preview JSON into a real topic-route navigation.
 function prefetchStoreKey(topicId) {
   return `topic-preview-modal:prefetch:${topicId}`;
 }
 
-// Prefetch does NOT send track_visit — only content is loaded early.
-// trackTopicVisit() marks the visit only when the preview is actually opened
-// (see the topic-list-item-click behavior transformer).
+// No track_visit here — trackTopicVisit() marks the visit only when the
+// preview actually opens.
 export function schedulePrefetch(topic) {
   if (!topic?.id || !settings.enable_prefetch) {
     return;
@@ -126,11 +120,10 @@ export function discardPrefetch(topicId) {
   }
 }
 
-// On open, move the (possibly still pending) prefetch promise from our
-// private key to the core `topic_${id}` key that the modal's loadTopic()
-// expects. Synchronous: do not await the network — the modal opens with its
-// own spinner and Topic.find() will wait on the same promise via
-// PreloadStore.
+// Moves the (possibly still pending) prefetch promise to the core
+// `topic_${id}` key that loadTopic() expects. Synchronous — do not await;
+// the modal opens with its own spinner and Topic.find() waits on the same
+// promise via PreloadStore.
 export function promotePrefetch(topic) {
   if (!topic?.id) {
     return;

@@ -122,22 +122,18 @@ export default class TopicPreviewTimingTracker {
         );
       }
 
-      if (component.topicController) {
-        const originalModel = component.topicController.model;
-        component.topicController.set("model", component.topicModel);
-
-        component.topicController.readPosts?.(
-          component.topicId,
-          flushedPostNumbers
-        );
-
-        component.topicController.set("model", originalModel);
-      }
-
-      // Core delegates nested topics to its global controller, so update
-      // the modal's own nested controller instead.
+      // Mark posts read on the models this modal owns directly, rather than
+      // borrowing controller:topic (that controller also drives the page
+      // behind the modal, so swapping its model would re-arg the whole page
+      // tree on every flush).
       if (component.isNestedView) {
         component.nested?.readPosts?.(flushedPostNumbers);
+      } else {
+        for (const post of component.topicModel?.postStream?.posts ?? []) {
+          if (!post.read && flushedPostNumbers.includes(post.post_number)) {
+            post.set?.("read", true);
+          }
+        }
       }
     } catch {
       // Retry on the next visibility cycle.

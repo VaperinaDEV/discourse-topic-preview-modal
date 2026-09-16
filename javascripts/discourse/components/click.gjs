@@ -21,11 +21,9 @@ export default class TopicListItemClick extends Component {
 
   @bind
   clickHandler(event) {
-    // Find the closest .topic-list-item element
     const targetElement = event.target.closest(".topic-list-item");
     if (!targetElement) return;
 
-    // Exclude certain selectors
     const excludedSelectors = [
       "a[data-user-card]",
       ".topic-participants a",
@@ -41,8 +39,7 @@ export default class TopicListItemClick extends Component {
 
     const topic = this.args.outletArgs.topic;
 
-    // Excluded category - do nothing and let the row's own title link
-    // navigate normally, no modal.
+    // Let the row's own title link navigate normally instead.
     if (isCategoryExcluded(topic?.category_id)) {
       return;
     }
@@ -74,9 +71,7 @@ export default class TopicListItemClick extends Component {
     return this.args.outletArgs.topic;
   }
 
-  // Visibility-driven prefetch (debounced) — this keeps working exactly as
-  // before, it's independent of how the click that opens the modal is
-  // handled.
+  // Visibility-driven prefetch, independent of how the opening click is handled.
   @action
   queueTopicPrefetch() {
     const topic = this.topic;
@@ -149,13 +144,11 @@ export default class TopicListItemClick extends Component {
     };
   });
 
-  // Register click event handler
   @action
   registerClickHandler(element) {
     element.parentElement.addEventListener("click", this.clickHandler, true);
   }
 
-  // Remove click event handler
   @action
   removeClickHandler(element) {
     element.parentElement.removeEventListener("click", this.clickHandler, true);

@@ -78,9 +78,8 @@ export default class TopicPreviewModal extends Component {
   // Keeps modal.show() from closing the topic preview.
   @tracked activeSubModal = null;
 
-  // Delegates: each owns one concern and reads/writes the tracked state
-  // above (and each other's public state) via the `component` reference
-  // it's constructed with.
+  // Delegates: each owns one concern, sharing state via the `component` ref
+  // they're constructed with.
   nested = new NestedTopicController(this);
   progressNav = new ProgressNavigator(this);
   composerInteractions = new TopicPreviewComposerInteractions(this);
@@ -92,6 +91,9 @@ export default class TopicPreviewModal extends Component {
   selfInitiatedClose = false;
   topicController = null;
   originalTopicControllerModel = undefined;
+  // Only true if we actually replaced controller:topic#model — restoring it
+  // unconditionally would bump the tag on the page's own render tree.
+  swappedTopicControllerModel = false;
   patchesRestored = false;
   servicePatches = null;
   timingTracker = null;
@@ -260,11 +262,30 @@ export default class TopicPreviewModal extends Component {
     this.patchesRestored = true;
     this.servicePatches?.restore();
     try {
-      if (this.topicController) {
+      if (this.topicController && this.swappedTopicControllerModel) {
+        this.swappedTopicControllerModel = false;
         this.topicController.set("model", this.originalTopicControllerModel);
       }
     } catch {
     }
+  }
+
+  // controller:topic#model drives the page behind the modal (including
+  // shouldRenderNestedView and the page's own <Nested @topic>), so only take
+  // it over when the topic route isn't on screen, and remember it so restore
+  // stays symmetrical.
+  adoptTopicController() {
+    if (!this.topicController || !this.topicModel) {
+      return;
+    }
+    if (this.router.currentRouteName?.startsWith("topic.")) {
+      return;
+    }
+    if (this.topicController.model === this.topicModel) {
+      return;
+    }
+    this.swappedTopicControllerModel = true;
+    this.topicController.set("model", this.topicModel);
   }
 
   get showSkeleton() {
@@ -380,9 +401,7 @@ export default class TopicPreviewModal extends Component {
         slug: this.topic.slug,
       });
 
-      if (!this.router.currentRouteName.startsWith("topic.")) {
-        this.topicController?.set("model", this.topicModel);
-      }
+      this.adoptTopicController();
 
       const knownNestedHint =
         this.topic?.is_nested_view ?? this.topic?.nested_topic;
@@ -720,6 +739,7 @@ export default class TopicPreviewModal extends Component {
                     @togglePostType={{this.postActions.togglePostType}}
                     @toggleWiki={{this.postActions.toggleWiki}}
                     @unhidePost={{this.postActions.unhidePost}}
+                    @expansionState={{this.nested.expansionState}}
                     @fetchedChildrenCache={{this.nested.fetchedChildrenCache}}
                     @selectReplies={{this.postActions.selectReplies}}
                     @selectBelow={{this.postActions.selectBelow}}

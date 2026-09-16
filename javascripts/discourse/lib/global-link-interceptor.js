@@ -4,23 +4,11 @@ import { matchTopicLink } from "./topic-link";
 import { triggerHaptic } from "./haptic";
 import { findKnownCategoryId, isCategoryExcluded } from "./excluded-categories";
 
-// Installs a single, capture-phase document click listener that opens the
-// preview modal for ANY link pointing to a topic, anywhere on the page —
-// post content, notifications, user card "recent topics", search results,
-// suggested/related topics, sidebar, etc.
-//
-// Deliberately left alone (NOT intercepted here — each has its own, already
-// correct behavior):
-//   - .topic-list-item        -> handled by click.gjs / button-trigger.gjs
-//                                 (prefetch, exclusions like user-card/tags).
-//   - .topic-preview-modal    -> handled by the modal's own
-//                                 handleInternalLinkClick (same-topic jump)
-//                                 and the DiscourseURL.routeTo patch
-//                                 (different-topic -> close + navigate away,
-//                                 see service-patches.js for why).
-//   - the topic you're already reading on its own full page -> let core's
-//     normal in-page post jump handle it instead of popping a modal on top
-//     of the page that's already showing that same topic.
+// Capture-phase document click listener that opens the preview modal for any
+// link pointing to a topic, anywhere on the page. Left alone (already handled
+// elsewhere): .topic-list-item (click.gjs/button-trigger.gjs), links inside
+// the modal itself (handleInternalLinkClick + the routeTo patch in
+// service-patches.js), and links to the topic already open on its own page.
 //
 // Called once from the api-initializer when settings.open_all_topic_links
 // is enabled.
@@ -46,9 +34,7 @@ function handleClick(event, api) {
   }
 
   const rawHref = link.getAttribute("href") || "";
-  // Pure in-page anchors (e.g. "jump to quoted post" while reading the full
-  // topic) resolve to the current pathname below — bail before that so we
-  // never touch them.
+  // In-page anchors resolve to the current pathname below — bail first.
   if (rawHref.startsWith("#")) {
     return;
   }
@@ -81,16 +67,14 @@ function handleClick(event, api) {
     return;
   }
 
-  // Already reading this exact topic's full page — let core's own
-  // click-track handle the in-page jump instead of layering a modal on top.
+  // Already reading this topic's full page — let core handle the in-page jump.
   const currentMatch = matchTopicLink(window.location.pathname);
   if (currentMatch && currentMatch.topicId === match.topicId) {
     return;
   }
 
-  // Excluded category - only intercept if we can confirm it's NOT excluded;
-  // an unknown category (topic not yet loaded anywhere) keeps existing
-  // behavior and opens the modal.
+  // Only intercept once we can confirm the category isn't excluded; unknown
+  // categories keep the default behavior and open the modal.
   if (isCategoryExcluded(findKnownCategoryId(api, match.topicId))) {
     return;
   }
